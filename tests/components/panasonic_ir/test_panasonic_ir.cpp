@@ -32,6 +32,10 @@ static const uint8_t CKP_QUIET[] = {0x02, 0x20, 0xE0, 0x04, 0x00, 0x00, 0x00, 0x
 static const uint8_t DKE_HEAT_25[] = {0x02, 0x20, 0xE0, 0x04, 0x00, 0x00, 0x00, 0x06, 0x02,
                                       0x20, 0xE0, 0x04, 0x00, 0x4F, 0x32, 0x80, 0xAF, 0x0D,
                                       0x00, 0x06, 0x60, 0x00, 0x00, 0x01, 0x00, 0x06, 0x30};
+// Captured from an A75C4762-family remote: fan, horizontal vane left, OFF timer at 00:20, clock at 10:10.
+static const uint8_t RKR_FAN_TIMER_OFF_0020[] = {0x02, 0x20, 0xE0, 0x04, 0x00, 0x00, 0x00, 0x06, 0x02,
+                                                 0x20, 0xE0, 0x04, 0x00, 0x6D, 0x36, 0x80, 0x31, 0x0A,
+                                                 0x68, 0x49, 0x81, 0x00, 0x00, 0x80, 0x62, 0x02, 0x7A};
 // From the "Panasonic HVAC IR Protocol" notes by Mathieu (a CKP style remote)
 static const uint8_t NOTES_CKP_HEAT_30[] = {0x02, 0x20, 0xE0, 0x04, 0x00, 0x00, 0x00, 0x06, 0x02,
                                             0x20, 0xE0, 0x04, 0x00, 0x48, 0x3C, 0x80, 0xAF, 0x00,
@@ -108,8 +112,9 @@ static bool read(const RawTimings &raw, uint8_t *state) {
 // ---- Frame encoding and decoding ----------------------------------------------------------------------------------
 
 TEST(PanasonicFrame, ChecksumMatchesEveryRealFrame) {
-  for (const auto *f : {JKE_COOL_25_OFF, CKP_POWERFUL, CKP_QUIET, DKE_HEAT_25, NOTES_CKP_HEAT_30, ARTICLE_AUTO_25,
-                        PKE_8C_FAN_MAX, PKE_16C_FAN_MAX, PKE_30C_FAN_MAX, PKE_19C_AUTO, PKE_20C_AUTO}) {
+  for (const auto *f :
+       {JKE_COOL_25_OFF, CKP_POWERFUL, CKP_QUIET, DKE_HEAT_25, NOTES_CKP_HEAT_30, ARTICLE_AUTO_25, PKE_8C_FAN_MAX,
+        PKE_16C_FAN_MAX, PKE_30C_FAN_MAX, PKE_19C_AUTO, PKE_20C_AUTO, RKR_FAN_TIMER_OFF_0020}) {
     EXPECT_EQ(calc_checksum(f, STATE_LENGTH), f[STATE_LENGTH - 1]);
   }
 }
@@ -187,6 +192,36 @@ TEST(PanasonicFrame, EncodesTheCkpModelBytes) {
   EXPECT_EQ(state[23], NOTES_CKP_HEAT_30[23]);
 }
 
+TEST(PanasonicFrame, EncodesHorizontalVaneOnlyForSupportedModels) {
+  for (Model model : {Model::DKE, Model::RKR}) {
+    FrameParams p;
+    p.model = model;
+    for (uint8_t position :
+         {VANE_H_AUTO, VANE_H_FULL_LEFT, VANE_H_LEFT, VANE_H_MIDDLE, VANE_H_RIGHT, VANE_H_FULL_RIGHT}) {
+      p.vane_h = position;
+      uint8_t state[STATE_LENGTH];
+      encode_frame(p, state);
+      EXPECT_EQ(state[17], position);
+      FrameParams decoded;
+      decoded.model = model;
+      ASSERT_TRUE(decode_frame(state, decoded));
+      EXPECT_EQ(decoded.vane_h, position);
+    }
+  }
+
+  // Other models have a fixed byte 17 and must not be affected by a horizontal vane request.
+  for (Model model : {Model::JKE, Model::LKE, Model::NKE, Model::CKP, Model::PKE}) {
+    FrameParams p;
+    p.model = model;
+    uint8_t original[STATE_LENGTH];
+    encode_frame(p, original);
+    p.vane_h = VANE_H_FULL_RIGHT;
+    uint8_t changed[STATE_LENGTH];
+    encode_frame(p, changed);
+    EXPECT_EQ(frame(original), frame(changed));
+  }
+}
+
 TEST(PanasonicFrame, FanOnlyAlwaysSends27C) {
   FrameParams params;
   uint8_t state[STATE_LENGTH];
@@ -229,6 +264,13 @@ TEST(PanasonicFrame, DecodesRealFrames) {
   EXPECT_TRUE(p.power);
   EXPECT_EQ(p.mode, Mode::HEAT);
   EXPECT_EQ(p.temperature, 25);
+}
+
+TEST(PanasonicFrame, DecodesHorizontalVaneFromCapturedRkrRemote) {
+  FrameParams p;
+  p.model = Model::RKR;
+  ASSERT_TRUE(decode_frame(RKR_FAN_TIMER_OFF_0020, p));
+  EXPECT_EQ(p.vane_h, VANE_H_LEFT);
 }
 
 TEST(PanasonicFrame, DecodesTheAuthorsFrostProtectionFrames) {
@@ -740,6 +782,52 @@ TEST(PanasonicClimate, VanePositionLeavesFrostProtection) {
   f.climate.set_vane_position(3);
   EXPECT_EQ(f.climate.preset, climate::CLIMATE_PRESET_NONE);
   EXPECT_EQ(f.last_state()[16] & 0x0F, 3);
+}
+
+TEST(PanasonicClimate, HorizontalVaneSelectKeepsPositionAcrossCommands) {
+  Fixture f(Model::RKR);
+  f.command([](auto &call) {
+    call.set_mode(climate::CLIMATE_MODE_COOL);
+    call.set_target_temperature(23.0f);
+  });
+  EXPECT_EQ(f.last_state()[17], VANE_H_MIDDLE);
+
+  for (size_t i = 0; i < 6; i++) {
+    f.climate.set_horizontal_vane_position(i);
+    EXPECT_EQ(f.last_state()[17], HORIZONTAL_VANE_POSITIONS[i]);
+  }
+
+  f.command([](auto &call) { call.set_target_temperature(24.0f); });
+  EXPECT_EQ(f.last_state()[17], VANE_H_FULL_RIGHT);
+
+  const size_t sent = f.transmitter.frames.size();
+  f.climate.set_horizontal_vane_position(6);
+  EXPECT_EQ(f.transmitter.frames.size(), sent);
+}
+
+TEST(PanasonicClimate, VerticalDefaultIsKeptUntilSelectedOtherwise) {
+  Fixture f(Model::DKE);
+  f.climate.set_vertical_vane_default(4);
+  f.command([](auto &call) { call.set_mode(climate::CLIMATE_MODE_COOL); });
+  EXPECT_EQ(f.last_state()[16] & 0x0F, 4);
+
+  f.climate.set_vane_position(2);
+  EXPECT_EQ(f.last_state()[16] & 0x0F, 2);
+}
+
+TEST(PanasonicClimate, HorizontalVaneTracksRemoteCommands) {
+  Fixture f(Model::RKR);
+  ASSERT_TRUE(f.receive(RKR_FAN_TIMER_OFF_0020));
+  f.command([](auto &call) { call.set_mode(climate::CLIMATE_MODE_COOL); });
+  EXPECT_EQ(f.last_state()[17], VANE_H_LEFT);
+}
+
+TEST(PanasonicClimate, UnsupportedModelIgnoresHorizontalVaneChanges) {
+  Fixture f(Model::PKE);
+  f.command([](auto &call) { call.set_mode(climate::CLIMATE_MODE_COOL); });
+  const size_t sent = f.transmitter.frames.size();
+  f.climate.set_horizontal_vane_position(1);
+  EXPECT_EQ(f.transmitter.frames.size(), sent);
 }
 
 TEST(PanasonicClimate, ReceivesTheVanePosition) {
