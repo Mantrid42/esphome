@@ -7,6 +7,7 @@
 #include "esphome/components/select/select.h"
 #endif
 #include "panasonic_ac_frame.h"
+#include "panasonic_ac_protocol.h"
 
 namespace esphome::panasonic_ir {
 
@@ -31,6 +32,8 @@ class PanasonicIrClimate final : public climate_ir::ClimateIR {
   void set_model(Model model) { this->model_ = model; }
   void setup() override;
   void dump_config() override;
+  /// Diagnostic API entry point. Validates hex framing and regenerates the checksum before sending.
+  bool send_command_hex(const std::string &hex);
 
   /// Set the vertical vane from the select: 0 is auto (swing vertical), 1 (highest) to 5 (lowest) are fixed positions.
   void set_vane_position(size_t index);
@@ -56,6 +59,7 @@ class PanasonicIrClimate final : public climate_ir::ClimateIR {
   void sync_vane_select_();
   void sync_horizontal_vane_select_();
   void apply_received_(const FrameParams &params);
+  void log_command_(const Command &command, CommandStatus status);
 
   Model model_{Model::JKE};
   // The remote has no concept of "off" mode, so remember what to send along with the power bit

@@ -197,17 +197,7 @@ void PanasonicIrClimate::transmit_state() {
   this->echo_sent_ms_ = millis();
 
   auto transmit = this->transmitter_->transmit();
-  auto *data = transmit.get_data();
-  data->set_carrier_frequency(CARRIER_FREQUENCY);
-  // Two headers (mark + space) and footer marks, 16 timings per byte, and the gap
-  data->reserve(2 * 3 + STATE_LENGTH * 16 + 1);
-
-  data->item(HEADER_MARK, HEADER_SPACE);
-  data->item_bytes<BIT_TIMINGS>(state, SECTION1_LENGTH);
-  data->item(BIT_MARK, SECTION_GAP);
-  data->item(HEADER_MARK, HEADER_SPACE);
-  data->item_bytes<BIT_TIMINGS>(state + SECTION1_LENGTH, SECTION2_LENGTH);
-  data->mark(BIT_MARK);
+  encode_waveform(*transmit.get_data(), state);
 
   transmit.perform();
   this->sync_vane_select_();
@@ -215,9 +205,15 @@ void PanasonicIrClimate::transmit_state() {
 }
 
 bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
-  uint8_t state[STATE_LENGTH];
-  if (!read_state(data, state))
+  const Command command = read_command(data);
+  const CommandStatus status = classify_command(command, this->model_);
+  if (status == CommandStatus::COMMAND_STATUS_UNRELATED)
     return false;
+  this->log_command_(command, status);
+  if (status == CommandStatus::COMMAND_STATUS_INCOMPLETE || status == CommandStatus::COMMAND_STATUS_INVALID_CHECKSUM ||
+      command.length != STATE_LENGTH)
+    return false;
+  const uint8_t *state = command.bytes;
 
   FrameParams params;
   params.model = this->model_;

@@ -111,6 +111,90 @@ static bool read(const RawTimings &raw, uint8_t *state) {
 
 // ---- Frame encoding and decoding ----------------------------------------------------------------------------------
 
+TEST(PanasonicFrame, RkrTimerApplicationIsAnExplicitPerFrameChoice) {
+  FrameParams params;
+  params.model = Model::RKR;
+  EXPECT_FALSE(params.apply_timers);
+  for (const auto mode : {Mode::AUTO, Mode::COOL, Mode::HEAT, Mode::DRY, Mode::FAN}) {
+    for (const bool power : {false, true}) {
+      params.mode = mode;
+      params.power = power;
+      params.apply_timers = false;
+      uint8_t preserved[STATE_LENGTH];
+      encode_frame(params, preserved);
+      EXPECT_EQ(preserved[13] & 0x08, 0);
+      params.apply_timers = true;
+      uint8_t applied[STATE_LENGTH];
+      encode_frame(params, applied);
+      EXPECT_EQ(applied[13], preserved[13] | 0x08);
+      EXPECT_EQ(applied[26], static_cast<uint8_t>(preserved[26] + 8));
+      for (size_t i = 0; i < STATE_LENGTH; i++) {
+        if (i != 13 && i != 26)
+          EXPECT_EQ(applied[i], preserved[i]) << i;
+      }
+      EXPECT_EQ(applied[26], calc_checksum(applied, STATE_LENGTH));
+      params.apply_timers = false;
+      encode_frame(params, applied);
+      EXPECT_EQ(frame(applied), frame(preserved));
+    }
+  }
+}
+
+TEST(PanasonicFrame, TimerPolicyDoesNotChangeOtherModels) {
+  for (const auto model : {Model::DKE, Model::JKE, Model::LKE, Model::NKE, Model::CKP, Model::PKE}) {
+    FrameParams params;
+    params.model = model;
+    uint8_t preserved[STATE_LENGTH];
+    encode_frame(params, preserved);
+    params.apply_timers = true;
+    uint8_t applied[STATE_LENGTH];
+    encode_frame(params, applied);
+    EXPECT_EQ(frame(applied), frame(preserved)) << static_cast<int>(model);
+  }
+}
+
+TEST(PanasonicFrame, ShortCommandsMatchRemoteCaptures) {
+  const uint8_t cancel_all[]{0x02, 0x20, 0xE0, 0x04, 0x00, 0x00, 0x00, 0x06,
+                             0x02, 0x20, 0xE0, 0x04, 0x80, 0xB6, 0x32, 0x6E};
+  uint8_t encoded[SHORT_COMMAND_LENGTH];
+  encode_rkr_cancel_all_timers(encoded);
+  EXPECT_EQ(Frame(encoded, encoded + sizeof(encoded)), Frame(cancel_all, cancel_all + sizeof(cancel_all)));
+  EXPECT_EQ(encoded[15], sum_bytes(encoded + SECTION1_LENGTH, 7));
+  const uint8_t toggle[]{0x80, 0x9C, 0x32};
+  encode_short_command(toggle, encoded);
+  EXPECT_EQ(Frame(encoded, encoded + sizeof(encoded)), Frame(PKE_TOGGLE, PKE_TOGGLE + sizeof(PKE_TOGGLE)));
+}
+
+TEST(PanasonicFrame, ShortCommandWaveformHasTwoEightByteSections) {
+  uint8_t encoded[SHORT_COMMAND_LENGTH];
+  encode_rkr_cancel_all_timers(encoded);
+  remote_base::RemoteTransmitData data;
+  encode_waveform(data, encoded);
+  RawTimings expected;
+  add_section(expected, encoded, 8);
+  expected.push_back(-static_cast<int32_t>(SECTION_GAP));
+  add_section(expected, encoded + 8, 8);
+  EXPECT_EQ(data.get_carrier_frequency(), 36700);
+  EXPECT_EQ(data.get_data().size(), 263);
+  EXPECT_EQ(data.get_data(), expected);
+  uint8_t state[STATE_LENGTH];
+  EXPECT_FALSE(read(data.get_data(), state));  // A command must not be published as climate state.
+}
+
+TEST(PanasonicFrame, StateWaveformRemainsUnchangedForEveryModel) {
+  for (const auto model : {Model::DKE, Model::JKE, Model::LKE, Model::NKE, Model::CKP, Model::RKR, Model::PKE}) {
+    FrameParams params;
+    params.model = model;
+    uint8_t state[STATE_LENGTH];
+    encode_frame(params, state);
+    remote_base::RemoteTransmitData data;
+    encode_waveform(data, state);
+    EXPECT_EQ(data.get_carrier_frequency(), 36700);
+    EXPECT_EQ(data.get_data().size(), 439);
+    EXPECT_EQ(data.get_data(), capture(state));
+  }
+}
+
 TEST(PanasonicFrame, ChecksumMatchesEveryRealFrame) {
   for (const auto *f :
        {JKE_COOL_25_OFF, CKP_POWERFUL, CKP_QUIET, DKE_HEAT_25, NOTES_CKP_HEAT_30, ARTICLE_AUTO_25, PKE_8C_FAN_MAX,
@@ -533,6 +617,28 @@ TEST(PanasonicClimate, TransmitsTwoSectionsWithTheRightTimings) {
   EXPECT_EQ(t.back(), static_cast<int32_t>(BIT_MARK));
 }
 
+TEST(PanasonicClimate, RkrPreservesTimersAcrossFanAndPowerChanges) {
+  // Replayed on an A75C4762-family unit: both frames were accepted with the timer indicator still lit.
+  static constexpr uint8_t RKR_FAN_ON[] = {0x02, 0x20, 0xE0, 0x04, 0x00, 0x00, 0x00, 0x06, 0x02,
+                                           0x20, 0xE0, 0x04, 0x00, 0x61, 0x36, 0x80, 0x41, 0x06,
+                                           0x00, 0x0E, 0xE0, 0x00, 0x00, 0x89, 0x00, 0x00, 0xDB};
+  static constexpr uint8_t RKR_FAN_OFF[] = {0x02, 0x20, 0xE0, 0x04, 0x00, 0x00, 0x00, 0x06, 0x02,
+                                            0x20, 0xE0, 0x04, 0x00, 0x60, 0x36, 0x80, 0x41, 0x06,
+                                            0x00, 0x0E, 0xE0, 0x00, 0x00, 0x89, 0x00, 0x00, 0xDA};
+  Fixture f(Model::RKR);
+  f.climate.set_vertical_vane_default(1);
+  f.command([](auto &call) {
+    call.set_mode(climate::CLIMATE_MODE_FAN_ONLY);
+    call.set_fan_mode("Minimum");
+  });
+  f.command([](auto &call) { call.set_fan_mode(climate::CLIMATE_FAN_LOW); });
+  EXPECT_EQ(f.last_state(), frame(RKR_FAN_ON));
+  f.command([](auto &call) { call.set_mode(climate::CLIMATE_MODE_OFF); });
+  EXPECT_EQ(f.last_state(), frame(RKR_FAN_OFF));
+  f.command([](auto &call) { call.set_mode(climate::CLIMATE_MODE_FAN_ONLY); });
+  EXPECT_EQ(f.last_state(), frame(RKR_FAN_ON));
+}
+
 TEST(PanasonicClimate, OffKeepsTheLastModeAndClearsThePowerBit) {
   Fixture f;
   f.command([](auto &call) {
@@ -887,6 +993,144 @@ TEST(PanasonicClimate, HearsItsOwnTransmissions) {
     EXPECT_FLOAT_EQ(g.climate.target_temperature, 22.0f);
     EXPECT_EQ(g.climate.get_custom_fan_mode(), "Minimum");
   }
+}
+
+static Command decode_command(const RawTimings &raw) {
+  remote_base::RemoteReceiveData data(raw, TOLERANCE_PERCENT, remote_base::TOLERANCE_MODE_PERCENTAGE);
+  return read_command(data);
+}
+
+static RawTimings command_capture(const Command &command) {
+  RawTimings raw;
+  add_section(raw, command.bytes, 8);
+  raw.push_back(-static_cast<int32_t>(SECTION_GAP));
+  add_section(raw, command.bytes + 8, command.length - 8);
+  return raw;
+}
+
+TEST(PanasonicProtocol, HexFormsRegenerateChecksums) {
+  for (const char *input : {"02 20 E0 04 00 00 00 06 02 20 E0 04 80 B6 32 00", "0220e004000000060220e00480b632",
+                            "02 20 E0 04 80 B6 32 00", "\t0220E00480B632\n"}) {
+    Command command;
+    ASSERT_TRUE(parse_command_hex(StringRef(input), command)) << input;
+    EXPECT_EQ(command.length, 16);
+    EXPECT_EQ(command.bytes[15], 0x6E);
+    EXPECT_EQ(classify_command(command, Model::RKR), CommandStatus::COMMAND_STATUS_VALID_KNOWN);
+  }
+  for (const size_t offset : {0, 8}) {
+    for (const size_t omit : {0, 1}) {
+      char text[format_hex_pretty_size(STATE_LENGTH)];
+      auto bytes = frame(PKE_20C_AUTO);
+      bytes[26] = 0;
+      Command command;
+      ASSERT_TRUE(parse_command_hex(
+          StringRef(format_hex_pretty_to(text, bytes.data() + offset, 27 - offset - omit, ' ')), command));
+      EXPECT_EQ(command.length, 27);
+      EXPECT_EQ(Frame(command.bytes, command.bytes + 27), frame(PKE_20C_AUTO));
+    }
+  }
+}
+
+TEST(PanasonicProtocol, RejectsMalformedHexWithoutSending) {
+  Fixture f(Model::RKR);
+  for (const char *input :
+       {"", "0220E00480B63", "02 20 E0 04 80 B6 GG", "0 2 20 E0 04 80 B6 32", "02,20,E0,04,80,B6,32",
+        "12 20 E0 04 80 B6 32", "02 20 E0 04 00 B6 32", "02 20 E0 04 00 00 00 07 02 20 E0 04 80 B6 32",
+        "0220E004000000060220E00400492880AF00000EE000008100001500"}) {
+    EXPECT_FALSE(f.climate.send_command_hex(input)) << input;
+  }
+  EXPECT_TRUE(f.transmitter.frames.empty());
+}
+
+TEST(PanasonicProtocol, KnownShortActionsAndUnknownModel) {
+  const std::pair<const char *, ShortAction> cases[] = {
+      {"0220E00480B632", ShortAction::SHORT_ACTION_CANCEL_ALL},
+      {"0220E004809C32", ShortAction::SHORT_ACTION_POWERFUL_QUIET},
+      {"0220E004806133", ShortAction::SHORT_ACTION_NANOE_G},
+      {"0220E0048068F2", ShortAction::SHORT_ACTION_ECONAVI_ON},
+      {"0220E004805233", ShortAction::SHORT_ACTION_ECONAVI_OFF},
+  };
+  for (const auto &[input, action] : cases) {
+    Command command;
+    ASSERT_TRUE(parse_command_hex(StringRef(input), command));
+    const auto received = decode_command(command_capture(command));
+    EXPECT_EQ(classify_command(received, Model::RKR), CommandStatus::COMMAND_STATUS_VALID_KNOWN);
+    EXPECT_EQ(short_action(received, Model::RKR), action);
+    EXPECT_EQ(classify_command(received, Model::DKE), CommandStatus::COMMAND_STATUS_VALID_UNKNOWN);
+  }
+}
+
+TEST(PanasonicProtocol, ClassifiesUnknownFieldsAndBothBadChecksums) {
+  Command command;
+  ASSERT_TRUE(parse_command_hex(StringRef("0220E00480FE33"), command));
+  EXPECT_EQ(classify_command(decode_command(command_capture(command)), Model::RKR),
+            CommandStatus::COMMAND_STATUS_VALID_UNKNOWN);
+  for (const size_t index : {7, 15}) {
+    auto bad = command;
+    bad.bytes[index] ^= 1;
+    EXPECT_EQ(classify_command(decode_command(command_capture(bad)), Model::RKR),
+              CommandStatus::COMMAND_STATUS_INVALID_CHECKSUM);
+  }
+  FrameParams params;
+  params.model = Model::RKR;
+  encode_frame(params, command.bytes);
+  command.length = 27;
+  EXPECT_EQ(classify_command(command, Model::RKR), CommandStatus::COMMAND_STATUS_VALID_KNOWN);
+  command.bytes[25] |= 0x80;
+  command.bytes[26] = calc_checksum(command.bytes, 27);
+  EXPECT_EQ(classify_command(decode_command(command_capture(command)), Model::RKR),
+            CommandStatus::COMMAND_STATUS_VALID_UNKNOWN);
+}
+
+TEST(PanasonicProtocol, SplitAndMalformedCapturesAreExplicit) {
+  Command command;
+  ASSERT_TRUE(parse_command_hex(StringRef("0220E00480B632"), command));
+  RawTimings split;
+  add_section(split, command.bytes + 8, 8);
+  split.push_back(-5000);
+  const auto received = decode_command(split);
+  EXPECT_TRUE(received.reconstructed_prefix);
+  EXPECT_EQ(classify_command(received, Model::RKR), CommandStatus::COMMAND_STATUS_VALID_KNOWN);
+  EXPECT_EQ(classify_command(decode_command(capture(PKE_20C_AUTO, Sections::FIRST, 5000)), Model::RKR),
+            CommandStatus::COMMAND_STATUS_INCOMPLETE);
+  auto truncated = command_capture(command);
+  truncated.resize(truncated.size() - 10);
+  const auto partial = decode_command(truncated);
+  EXPECT_GT(partial.length, 8);
+  EXPECT_EQ(classify_command(partial, Model::RKR), CommandStatus::COMMAND_STATUS_INCOMPLETE);
+  auto extra = command_capture(command);
+  extra.push_back(-5000);
+  extra.push_back(432);
+  EXPECT_EQ(classify_command(decode_command(extra), Model::RKR), CommandStatus::COMMAND_STATUS_INCOMPLETE);
+  command.bytes[0] = 0x12;
+  EXPECT_EQ(classify_command(decode_command(command_capture(command)), Model::RKR),
+            CommandStatus::COMMAND_STATUS_UNRELATED);
+}
+
+TEST(PanasonicProtocol, ShortReceiveAndRawTransmitNeverChangeClimateState) {
+  Fixture f(Model::RKR);
+  ASSERT_TRUE(f.receive(RKR_FAN_TIMER_OFF_0020));
+  const auto mode = f.climate.mode;
+  const auto temperature = f.climate.target_temperature;
+  const auto fan = f.climate.get_custom_fan_mode();
+  const auto swing = f.climate.swing_mode;
+  ASSERT_TRUE(f.climate.send_command_hex("0220E00480B632"));
+  ASSERT_EQ(f.transmitter.frames.size(), 1);
+  const auto sent = decode_command(f.transmitter.frames.back());
+  EXPECT_EQ(sent.length, 16);
+  EXPECT_EQ(sent.bytes[15], 0x6E);
+  EXPECT_FALSE(f.receive(f.transmitter.frames.back()));
+  auto bad = sent;
+  bad.bytes[15] ^= 1;
+  EXPECT_FALSE(f.receive(command_capture(bad)));
+  EXPECT_EQ(f.climate.mode, mode);
+  EXPECT_EQ(f.climate.target_temperature, temperature);
+  EXPECT_EQ(f.climate.get_custom_fan_mode(), fan);
+  EXPECT_EQ(f.climate.swing_mode, swing);
+  ASSERT_TRUE(f.climate.send_command_hex("0220E00400492880AF00000EE00000810000"));
+  EXPECT_EQ(decode_command(f.transmitter.frames.back()).bytes[26], 0x15);
+  EXPECT_EQ(f.climate.mode, mode);
+  EXPECT_EQ(f.climate.target_temperature, temperature);
 }
 
 }  // namespace esphome::panasonic_ir::testing

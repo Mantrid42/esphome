@@ -23,14 +23,16 @@ and captures from the remote of a CS-NE9PKE.
 B0-B12: static 0x0220E004000000060220E00400
 B13:    b0 power (CKP: toggle), b4-6 mode, other bits per model
 B14:    b1-5 temperature
+B15:    tested RKR remote sends 0x7F for MILD DRY on, 0x80 for off in COOL; see PROTOCOL.md
 B16:    b0-3 vertical vane (1 highest to 5 lowest, 15 auto), b4-7 fan speed + 3
 B17:    horizontal vane on DKE/RKR (6 middle, 9-12 fixed positions, 13 auto); otherwise per model
 B21, B23, B25: per model
 B26:    checksum, sum of B0-B25 plus 0xF4 (the first section sums to 0x10C, so it is the sum of B8-B25)
-Stateless buttons (quiet/powerful, nanoe-G) send an 8 byte second section, which is ignored.
+Button commands can use an 8 byte second section, decoded separately from climate state.
 */
 
 static constexpr size_t STATE_LENGTH = 27;
+static constexpr size_t SHORT_COMMAND_LENGTH = 16;
 static constexpr size_t SECTION1_LENGTH = 8;
 static constexpr size_t SECTION2_LENGTH = STATE_LENGTH - SECTION1_LENGTH;
 static constexpr uint8_t CHECKSUM_INIT = 0xF4;
@@ -96,7 +98,7 @@ static constexpr ModelBytes MODEL_BYTES[] PROGMEM = {
     {0x02, 0x06, 0x00, 0x81, 0x00},  // LKE
     {0x00, 0x06, 0x00, 0x81, 0x00},  // NKE
     {0x00, 0x00, 0x10, 0x01, 0x00},  // CKP
-    {0x08, 0x06, 0x00, 0x89, 0x00},  // RKR
+    {0x00, 0x06, 0x00, 0x89, 0x00},  // RKR: leave B13 bit 3 clear to preserve timers set by the remote
     {0x08, 0x00, 0x00, 0x81, 0x00},  // PKE
 };
 
@@ -108,6 +110,9 @@ struct FrameParams {
   uint8_t fan_speed{FAN_SPEED_AUTO};
   uint8_t vane_v{VANE_V_AUTO};
   uint8_t vane_h{VANE_H_MIDDLE};
+  // Provisional RKR policy for B13 bit 3, not a universal timer-update flag. See PROTOCOL.md.
+  // Timer values, enables, slots and clock are not yet encoded by FrameParams.
+  bool apply_timers{false};
 };
 
 /// The part of the state that doesn't depend on the settings. Built in code, so it doesn't take up RAM on an ESP8266
@@ -135,6 +140,8 @@ inline void encode_frame(const FrameParams &p, uint8_t *state) {
   ModelBytes model;
   progmem_memcpy(&model, &MODEL_BYTES[static_cast<uint8_t>(p.model)], sizeof(model));
   state[13] = model.b13_or | (p.power ? 0x01 : 0x00) | ((static_cast<uint8_t>(p.mode) & 0x07) << 4);
+  if (p.model == Model::RKR && p.apply_timers)
+    state[13] |= 0x08;
   const uint8_t temp = p.mode == Mode::FAN ? TEMP_FAN_MODE : p.temperature;
   state[14] = (temp & 0x1F) << 1;
   state[16] = (p.vane_v & 0x0F) | (((p.fan_speed + FAN_SPEED_OFFSET) & 0x0F) << 4);
@@ -194,6 +201,40 @@ static constexpr uint32_t BIT_ZERO_SPACE = 432;
 static constexpr uint32_t SECTION_GAP = 10000;
 static constexpr remote_base::BitTimings BIT_TIMINGS{
     .bit_mark = BIT_MARK, .one_space = BIT_ONE_SPACE, .zero_space = BIT_ZERO_SPACE};
+
+/// Encode a short command's three payload bytes, including both prefixes and its checksum.
+/// DKE examples: https://habr.com/ru/articles/189142/ . Action meanings depend on the model; see PROTOCOL.md.
+inline void encode_short_command(const uint8_t (&command)[3], uint8_t (&frame)[SHORT_COMMAND_LENGTH]) {
+  memset(frame, 0, sizeof(frame));
+  frame[0] = frame[8] = 0x02;
+  frame[1] = frame[9] = 0x20;
+  frame[2] = frame[10] = 0xE0;
+  frame[3] = frame[11] = 0x04;
+  frame[7] = 0x06;
+  memcpy(frame + 12, command, sizeof(command));
+  frame[15] = calc_checksum(frame, SHORT_COMMAND_LENGTH);
+}
+
+/// Original A75C4762-family capture: cancels timers without changing fan speed in the tested state.
+/// Other features, modes and models have not been verified; see PROTOCOL.md.
+inline void encode_rkr_cancel_all_timers(uint8_t (&frame)[SHORT_COMMAND_LENGTH]) {
+  const uint8_t command[]{0x80, 0xB6, 0x32};
+  encode_short_command(command, frame);
+}
+
+/// Write either supported frame length to the transmitter buffer; does not start transmission.
+template<size_t N> inline void encode_waveform(remote_base::RemoteTransmitData &data, const uint8_t (&frame)[N]) {
+  static_assert(N == STATE_LENGTH || N == SHORT_COMMAND_LENGTH);
+  data.set_carrier_frequency(CARRIER_FREQUENCY);
+  // Two headers and footer marks, 16 timings per byte, and the section gap.
+  data.reserve(2 * 3 + N * 16 + 1);
+  data.item(HEADER_MARK, HEADER_SPACE);
+  data.item_bytes<BIT_TIMINGS>(frame, SECTION1_LENGTH);
+  data.item(BIT_MARK, SECTION_GAP);
+  data.item(HEADER_MARK, HEADER_SPACE);
+  data.item_bytes<BIT_TIMINGS>(frame + SECTION1_LENGTH, N - SECTION1_LENGTH);
+  data.mark(BIT_MARK);
+}
 
 /// A footer mark, followed by the end of the capture or a long space (idle time or section gap), never a bit.
 inline bool peek_footer(const remote_base::RemoteReceiveData &data) {

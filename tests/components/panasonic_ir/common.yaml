@@ -14,3 +14,12 @@ select:
       name: Panasonic Vane Position
     horizontal_vane_position:
       name: Panasonic Horizontal Vane Position
+
+api:
+  actions:
+    - action: send_panasonic_ac_command
+      variables:
+        data: string
+      then:
+        - lambda: |-
+            id(panasonic_climate).send_command_hex(data);
