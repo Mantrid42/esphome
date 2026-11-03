@@ -136,7 +136,7 @@ uint8_t PanasonicIrClimate::fan_speed_() const {
   }
 }
 
-void PanasonicIrClimate::transmit_state() {
+void PanasonicIrClimate::build_state_(uint8_t *state) {
   // Frost protection is sent as the remote does, whatever else a call combined with the preset set, and the entity
   // shows what is sent
   const bool maintenance = this->mode != climate::CLIMATE_MODE_OFF &&
@@ -191,8 +191,21 @@ void PanasonicIrClimate::transmit_state() {
   params.vane_v = this->vane_v_();
   params.vane_h = this->horizontal_vane_position_;
 
-  uint8_t state[STATE_LENGTH];
   encode_frame(params, state);
+}
+
+void PanasonicIrClimate::transmit_state() {
+  uint8_t state[STATE_LENGTH];
+  this->build_state_(state);
+  this->send_state_(state);
+  this->sync_vane_select_();
+  this->sync_horizontal_vane_select_();
+}
+
+void PanasonicIrClimate::send_state_(const uint8_t (&state)[STATE_LENGTH]) {
+  char hex[format_hex_pretty_size(STATE_LENGTH)];
+  ESP_LOGD(TAG, "TX full state B13=%02X B19=%02X B20=%02X B25=%02X: %s", state[13], state[19], state[20], state[25],
+           format_hex_pretty_to(hex, state, STATE_LENGTH, ' '));
   memcpy(this->echo_, state + SECTION1_LENGTH, SECTION2_LENGTH);
   this->echo_sent_ms_ = millis();
 
@@ -200,8 +213,6 @@ void PanasonicIrClimate::transmit_state() {
   encode_waveform(*transmit.get_data(), state);
 
   transmit.perform();
-  this->sync_vane_select_();
-  this->sync_horizontal_vane_select_();
 }
 
 bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {

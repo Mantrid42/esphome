@@ -131,3 +131,78 @@ physical effects. Transmission logs show the final bytes. Raw sends do not publi
 For example, `0220E00480B632` builds the verified 16-byte ALL CANCEL command with checksum `6E`.
 This is a diagnostic API, not a timer-control entity. Keep the generic `send_pronto` action and receiver
 `dump: all` for timing investigations. No hardware transmission or flashing is performed by unit tests.
+
+
+## Experimental HA-owned slot 2 timers
+
+The local implementation addresses ON2 and OFF2 only. Ordinary climate and vane writes still use
+B13.3=0, regardless of desired timer state. There is deliberately no always-update switch yet.
+No short independent timer programming command is established by our captures or the reviewed DKE
+research. Timer writes therefore carry the component's current full operating state, including power,
+mode, fan, temperature and vanes. They are not isolated timer-only commands. Remote-only features such
+as MILD DRY/iAUTO-X are not retained by the normal climate encoder, and may be affected by a timer write.
+
+The four new SET captures establish packing: ON1 06:00/OFF 23:30, ON2 17:00/OFF 23:30,
+OFF1 23:30/ON 06:00, OFF2 02:10/ON 06:00. They decode clock candidates as 20:28, 20:27,
+20:37 and 20:37. The remote clock was not recorded. The user's sequences added a second timer of the
+same kind while the first was already configured; persistence of the first timer was not observed by
+waiting for it to fire. Both candidate update flags are set in every SET capture. There is no captured
+combined ON2+OFF2 write and no verified individual disable capture.
+
+### Wire policy
+
+Every explicit HA timer operation sends one full frame with both slot selectors set. B13 bits 1 and 2
+carry desired ON2/OFF2 enables; bit 3 is set. B18 and B19.0..2 hold ON minutes. B19.4..7 and B20.0..6
+hold OFF minutes. B19.3 and B20.7 are both set, matching the SET captures; independent effects are unknown.
+B24 and B25.0..2 hold local clock minutes. B25.6 and B25.7 are both set; B25.3..5 are preserved from the
+base operating frame. B26 is regenerated. Times are retained in the frame even when disabled: this is a
+hypothesis for cancelling only the selected slot, not a verified cancellation command.
+
+`encode_rkr_timers` patches just these fields and supports separate selectors/update flags for tests
+and future policy changes. `RkrTimers` owns the HA state and always chooses slot 2 for both directions.
+`PanasonicIrClimate::send_timer_state` refuses non-RKR models and any slot-1 selection. It does not
+change the normal frame policy. No timer fields are imported into HA's desired state from remote IR.
+
+### Controls, restoration and clock
+
+The optional `panasonic_ir` controller takes `climate_id` and `time_id`. Its datetime and switch
+platforms select `timer: ON2` or `OFF2`. The button platform exposes `apply_timers`.
+The development YAML names switches "ON2 enabled (requested)" and "OFF2 enabled (requested)";
+they advertise assumed state, not physical acknowledgement. Both default disabled. Initial times are
+06:00 and 23:30. The two times and enables are saved together using the climate entity's preferences.
+Normal ESPHome preference flush rules apply, so an immediate power loss can lose recent edits.
+
+Changing either time or enable, including setting a disabled timer's time, sends both intended slots.
+Applying unchanged values also sends, allowing a deliberate retry. Enabling does not choose a time
+from the remote. Disabling one retains that timer's configured time and clears its enable bit while
+applying the other HA slot exactly as remembered. The Apply button resends the same pair with a fresh
+clock. Times must have zero seconds and minutes divisible by ten; unsupported values are rejected and
+the existing value is republished, with no transmission. There is no silent rounding.
+
+Restoration only publishes desired state. There are no boot, time-sync or periodic IR automations.
+A write with an invalid clock saves intent but sends nothing; use Apply once the HA clock is valid.
+The clock uses `RealTimeClock::now()` (local time including DST), at one-minute resolution, not rounded
+to ten minutes. The development config explicitly uses `Australia/Sydney` with Home Assistant time.
+DST changes are reflected in subsequent writes, not automatically sent to the unit; reapply after a
+clock/DST change if the indoor unit does not adjust itself. The physical interpretation of the clock
+field still needs a capture with the remote clock recorded.
+
+### Hardware experiments required before relying on slot-1 isolation
+
+1. With the ESP transmitter shielded, inspect the native timer logs and receiver capture: compare
+   bytes/checksum for ON2-only, OFF2-only, both enabled and both disabled; record the remote clock in
+   a fresh SET capture. Confirm ten-minute timer inputs and the minute-accurate local clock.
+2. Arm an imminent slot-1 ON timer using the remote, then apply an enabled slot-2 pair. Wait for ON1
+   to execute. Repeat for OFF1. An indicator or a beep alone cannot establish preservation.
+3. Keep both slot-1 timers armed; disable only ON2, then only OFF2. Verify each selected timer stops
+   executing, the other HA timer retains its intended behavior, and both remote timers still execute.
+4. Compare a combined ON2+OFF2 frame with individual SET operations, including midnight and opposite
+   orderings of ON/OFF times. Test initially disabled slots as well as already active ones.
+5. Repeat from COOL, FAN, OFF and AUTO/iAUTO-X, recording mode/fan/vanes and feature indicators.
+   B25.7 collides with our iAUTO-X candidate; do not infer feature isolation from its timer selector use.
+6. Only if necessary, vary B19.3 and B20.7 one at a time while keeping other bytes fixed, and test
+   whether the clock needs refreshing across DST. Do not enable automatic timer updates until the
+   selected-slot and disable behaviors are established.
+
+Slot 1 is expected to be unselected by the proposed encoding, but preservation is **not guaranteed**
+by any current capture or unit test. Tests prove bytes and software behavior, not indoor-unit semantics.

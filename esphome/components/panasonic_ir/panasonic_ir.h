@@ -8,6 +8,9 @@
 #endif
 #include "panasonic_ac_frame.h"
 #include "panasonic_ac_protocol.h"
+#ifdef USE_PANASONIC_RKR_TIMERS
+#include "panasonic_rkr_timer_frame.h"
+#endif
 
 namespace esphome::panasonic_ir {
 
@@ -34,6 +37,9 @@ class PanasonicIrClimate final : public climate_ir::ClimateIR {
   void dump_config() override;
   /// Diagnostic API entry point. Validates hex framing and regenerates the checksum before sending.
   bool send_command_hex(const std::string &hex);
+#ifdef USE_PANASONIC_RKR_TIMERS
+  bool send_timer_state(const RkrTimerFields &timers);
+#endif
 
   /// Set the vertical vane from the select: 0 is auto (swing vertical), 1 (highest) to 5 (lowest) are fixed positions.
   void set_vane_position(size_t index);
@@ -51,6 +57,8 @@ class PanasonicIrClimate final : public climate_ir::ClimateIR {
 
   /// Transmit via IR the state of this climate controller.
   void transmit_state() override;
+  void build_state_(uint8_t *state);
+  void send_state_(const uint8_t (&state)[STATE_LENGTH]);
   /// Handle received IR buffer
   bool on_receive(remote_base::RemoteReceiveData data) override;
 

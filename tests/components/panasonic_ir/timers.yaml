@@ -1,0 +1,47 @@
+# Experimental: requested HA state, not confirmation from the indoor unit.
+# Only slot 2 is addressed; isolation from slot 1 still needs hardware validation.
+time:
+  - platform: homeassistant
+    id: ha_clock
+    timezone: Australia/Sydney
+
+panasonic_ir:
+  id: ha_timers
+  climate_id: panasonic_rkr_climate
+  time_id: ha_clock
+
+datetime:
+  - platform: panasonic_ir
+    id: ac_on2_time
+    timers_id: ha_timers
+    timer: ON2
+    name: "ON2 time"
+  - platform: panasonic_ir
+    id: ac_off2_time
+    timers_id: ha_timers
+    timer: OFF2
+    name: "OFF2 time"
+
+switch:
+  - platform: panasonic_ir
+    timers_id: ha_timers
+    timer: ON2
+    name: "ON2 enabled (requested)"
+  - platform: panasonic_ir
+    timers_id: ha_timers
+    timer: OFF2
+    name: "OFF2 enabled (requested)"
+
+button:
+  - platform: panasonic_ir
+    timers_id: ha_timers
+    apply_timers:
+      name: "Apply HA Timers"
+
+climate:
+  - platform: panasonic_ir
+    id: panasonic_rkr_climate
+    name: RKR Timer Test
+    model: RKR
+    transmitter_id: xmitr
+    receiver_id: rcvr
