@@ -8,13 +8,9 @@
 
 namespace esphome::panasonic_ir {
 
-enum class TimerSlot : uint8_t { TIMER_SLOT_ON2, TIMER_SLOT_OFF2 };
-
 struct RkrTimerSettings {
-  uint16_t on_minutes{360};
-  uint16_t off_minutes{1410};
-  uint8_t on_enabled{0};
-  uint8_t off_enabled{0};
+  uint16_t minutes[4]{360, 360, 1410, 1410};
+  uint8_t enabled[4]{};
 };
 
 // This is desired HA state, never inferred from remote captures or an IR acknowledgement.
@@ -27,9 +23,14 @@ class RkrTimers : public Component {
   bool get_enabled(TimerSlot slot) const;
   bool set_minutes(TimerSlot slot, uint16_t minutes);
   void set_enabled(TimerSlot slot, bool enabled);
-  bool apply();
+  bool apply(TimerSlot slot);
+  bool apply_all();
+  bool apply() { return this->apply_all(); }  // Existing experimental Apply button.
 
  protected:
+  static constexpr uint32_t APPLY_INTERVAL_ID = 0;
+  void process_pending_();
+  uint8_t pending_slots_{0};
   PanasonicIrClimate *climate_;
   time::RealTimeClock *clock_;
   ESPPreferenceObject preference_;

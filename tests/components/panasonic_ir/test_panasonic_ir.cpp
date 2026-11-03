@@ -1161,11 +1161,11 @@ TEST(PanasonicTimers, ReproducesReferenceTimerFieldsExactly) {
     EXPECT_EQ(fields.off_slot2, i == 3);
     EXPECT_EQ(fields.on_enabled, i < 2);
     EXPECT_EQ(fields.off_enabled, i >= 2);
-    EXPECT_TRUE(fields.update_on);
-    EXPECT_TRUE(fields.update_off);
+    EXPECT_TRUE(fields.on_unknown_flag);
+    EXPECT_TRUE(fields.off_unknown_flag);
     uint8_t encoded[STATE_LENGTH];
     memcpy(encoded, TIMER_CAPTURES[i], STATE_LENGTH);
-    for (const size_t index : {13, 18, 19, 20, 24, 25, 26})
+    for (const size_t index : {13, 18, 19, 20, 23, 24, 25, 26})
       encoded[index] = index == 13 ? 0x31 : 0;
     ASSERT_TRUE(encode_rkr_timers(fields, encoded));
     EXPECT_EQ(frame(encoded), frame(TIMER_CAPTURES[i]));
@@ -1184,6 +1184,7 @@ TEST(PanasonicTimers, EveryTenMinuteTimeAndEnableCombinationPreservesOperatingBy
                                   .off_enabled = (flags & 2) != 0};
       ASSERT_TRUE(encode_rkr_timers(fields, encoded));
       EXPECT_EQ(encoded[13], 0x39 | ((flags & 1) << 1) | ((flags & 2) << 1));
+      EXPECT_EQ(encoded[23], 0x80);
       EXPECT_EQ(encoded[25], 0xC5);
       EXPECT_EQ(encoded[24], 0x9F);
       EXPECT_EQ(encoded[26], sum_bytes(encoded + 8, 18));
@@ -1192,10 +1193,37 @@ TEST(PanasonicTimers, EveryTenMinuteTimeAndEnableCombinationPreservesOperatingBy
       EXPECT_EQ(decoded.off_minutes, 1430 - minutes);
       EXPECT_EQ(decoded.clock_minutes, 1439);
       for (size_t i = 0; i < 27; i++)
-        if (i != 13 && i != 18 && i != 19 && i != 20 && i != 24 && i != 25 && i != 26)
+        if (i != 13 && i != 18 && i != 19 && i != 20 && i != 23 && i != 24 && i != 25 && i != 26)
           EXPECT_EQ(encoded[i], TIMER_CAPTURES[0][i]);
     }
   }
+}
+
+TEST(PanasonicTimers, Off2CancellationMatchesHardwareTestedContext) {
+  Command programmed;
+  ASSERT_TRUE(parse_command_hex(
+      StringRef("02 20 E0 04 00 00 00 06 02 20 E0 04 00 6D 36 80 A1 06 68 89 D7 00 00 80 91 03"), programmed));
+  Command cancelled;
+  ASSERT_TRUE(parse_command_hex(
+      StringRef("02 20 E0 04 00 00 00 06 02 20 E0 04 00 69 36 80 A1 06 68 29 D8 00 00 80 90 C3"), cancelled));
+  uint8_t encoded[STATE_LENGTH];
+  memcpy(encoded, programmed.bytes, STATE_LENGTH);
+  encoded[23] = 0x89;  // Starting from the ordinary climate context must not leak into the update.
+  const RkrTimerFields fields{.on_minutes = 360, .off_minutes = 1410, .clock_minutes = 912};
+  ASSERT_TRUE(encode_rkr_timers(fields, encoded));
+  EXPECT_EQ(frame(encoded), frame(cancelled.bytes));
+  EXPECT_EQ(encoded[13], 0x69);
+  EXPECT_EQ(encoded[23], 0x80);
+  EXPECT_EQ(encoded[25], 0xC3);
+  EXPECT_EQ(encoded[26], sum_bytes(encoded + 8, 18));
+  auto ordinary_context = cancelled;
+  ordinary_context.bytes[23] = 0x89;
+  ordinary_context.bytes[26] = calc_checksum(ordinary_context.bytes, STATE_LENGTH);
+  EXPECT_NE(encoded[26], ordinary_context.bytes[26]);
+  // This compares encoding only; physical OFF1 preservation is recorded in PROTOCOL.md.
+  for (size_t i = 0; i < 26; i++)
+    if (i != 23)
+      EXPECT_EQ(encoded[i], ordinary_context.bytes[i]);
 }
 
 TEST(PanasonicTimers, InvalidValuesDoNotModifyFrameAndFlagsAreIndependent) {
@@ -1216,8 +1244,8 @@ TEST(PanasonicTimers, InvalidValuesDoNotModifyFrameAndFlagsAreIndependent) {
     RkrTimerFields fields{.clock_minutes = 0,
                           .on_slot2 = (flags & 1) != 0,
                           .off_slot2 = (flags & 2) != 0,
-                          .update_on = (flags & 4) != 0,
-                          .update_off = (flags & 8) != 0};
+                          .on_unknown_flag = (flags & 4) != 0,
+                          .off_unknown_flag = (flags & 8) != 0};
     ASSERT_TRUE(encode_rkr_timers(fields, encoded));
     EXPECT_EQ((encoded[25] >> 6) & 1, flags & 1);
     EXPECT_EQ((encoded[25] >> 7) & 1, (flags >> 1) & 1);
@@ -1245,7 +1273,7 @@ TEST(PanasonicTimers, RestoreAndInvalidClockNeverTransmit) {
   ASSERT_TRUE(timers.set_minutes(TimerSlot::TIMER_SLOT_ON2, 1020));
   timers.set_enabled(TimerSlot::TIMER_SLOT_ON2, true);
   timers.set_enabled(TimerSlot::TIMER_SLOT_OFF2, true);
-  EXPECT_FALSE(timers.apply());
+  EXPECT_FALSE(timers.apply(TimerSlot::TIMER_SLOT_ON2));
   EXPECT_TRUE(f.transmitter.frames.empty());
   RkrTimers restored(&f.climate, &clock);
   restored.setup();
@@ -1254,11 +1282,11 @@ TEST(PanasonicTimers, RestoreAndInvalidClockNeverTransmit) {
   EXPECT_TRUE(restored.get_enabled(TimerSlot::TIMER_SLOT_OFF2));
   clock.epoch = 1767598198;
   EXPECT_TRUE(f.transmitter.frames.empty());
-  ASSERT_TRUE(restored.apply());
+  ASSERT_TRUE(restored.apply(TimerSlot::TIMER_SLOT_ON2));
   EXPECT_EQ(f.transmitter.frames.size(), 1);
 }
 
-TEST(PanasonicTimers, ChangesApplyBothIntendedSlotsAndClimateCommandsPreserveTimers) {
+TEST(PanasonicTimers, ChangesApplyOnlyTargetSlotAndClimateCommandsPreserveTimers) {
   Fixture f(Model::RKR);
   TimerClock clock;
   clock.epoch = 1767598198;
@@ -1269,30 +1297,174 @@ TEST(PanasonicTimers, ChangesApplyBothIntendedSlotsAndClimateCommandsPreserveTim
     call.set_target_temperature(28);
   });
   const auto normal = f.last_state();
-  timers.set_enabled(TimerSlot::TIMER_SLOT_ON2, true);
-  EXPECT_EQ(f.last_state()[13], normal[13] | 0x0A);
-  timers.set_enabled(TimerSlot::TIMER_SLOT_OFF2, true);
-  EXPECT_EQ(f.last_state()[13], normal[13] | 0x0E);
-  timers.set_enabled(TimerSlot::TIMER_SLOT_ON2, false);
-  EXPECT_EQ(f.last_state()[13], normal[13] | 0x0C);
-  ASSERT_TRUE(timers.set_minutes(TimerSlot::TIMER_SLOT_OFF2, 130));
-  const auto update = f.last_state();
-  EXPECT_EQ(decode_rkr_timers(update.data()).off_minutes, 130);
-  EXPECT_EQ(update[25] & 0xC0, 0xC0);
-  for (size_t i = 0; i < 27; i++)
-    if (i != 13 && i != 18 && i != 19 && i != 20 && i != 24 && i != 25 && i != 26)
-      EXPECT_EQ(update[i], normal[i]);
+  EXPECT_EQ(normal[23], 0x89);
+  for (uint8_t i = 0; i < 4; i++) {
+    const auto slot = static_cast<TimerSlot>(i);
+    const bool on = i < 2;
+    for (const bool enabled : {true, false}) {
+      const auto before = f.transmitter.frames.size();
+      timers.set_enabled(slot, enabled);
+      ASSERT_EQ(f.transmitter.frames.size(), before + 1);
+      auto fields = decode_rkr_timers(f.last_state().data());
+      EXPECT_EQ(on ? fields.on_enabled : fields.off_enabled, enabled);
+      EXPECT_TRUE(on ? fields.off_enabled : fields.on_enabled);
+      EXPECT_EQ(on ? fields.off_minutes : fields.on_minutes, TIMER_TIME_SPECIAL);
+      EXPECT_EQ(fields.on_slot2, i == 1);
+      EXPECT_EQ(fields.off_slot2, i == 3);
+      EXPECT_TRUE(fields.on_unknown_flag);
+      EXPECT_TRUE(fields.off_unknown_flag);
+      ASSERT_TRUE(timers.set_minutes(slot, 1110));
+      fields = decode_rkr_timers(f.last_state().data());
+      EXPECT_EQ(on ? fields.on_minutes : fields.off_minutes, 1110);
+      EXPECT_EQ(on ? fields.on_enabled : fields.off_enabled, enabled);
+      ASSERT_TRUE(timers.apply(slot));
+      const auto update = f.last_state();
+      EXPECT_EQ(update[23], 0x80);
+      EXPECT_EQ(update[26], calc_checksum(update.data(), STATE_LENGTH));
+      for (size_t j = 0; j < 27; j++)
+        if (j != 13 && j != 18 && j != 19 && j != 20 && j != 23 && j != 24 && j != 25 && j != 26)
+          EXPECT_EQ(update[j], normal[j]);
+    }
+  }
   f.command([](auto &call) { call.set_fan_mode(climate::CLIMATE_FAN_HIGH); });
   EXPECT_EQ(f.last_state()[13] & 8, 0);
+  EXPECT_EQ(f.last_state()[23], 0x89);
   f.climate.set_vane_position(2);
   EXPECT_EQ(f.last_state()[13] & 8, 0);
+  EXPECT_EQ(f.last_state()[23], 0x89);
   f.climate.set_horizontal_vane_position(2);
   EXPECT_EQ(f.last_state()[13] & 8, 0);
+  EXPECT_EQ(f.last_state()[23], 0x89);
   ASSERT_TRUE(f.receive(TIMER_CAPTURES[0]));
-  EXPECT_FALSE(timers.get_enabled(TimerSlot::TIMER_SLOT_ON2));
-  EXPECT_EQ(timers.get_minutes(TimerSlot::TIMER_SLOT_OFF2), 130);
+  for (uint8_t i = 0; i < 4; i++) {
+    EXPECT_FALSE(timers.get_enabled(static_cast<TimerSlot>(i)));
+    EXPECT_EQ(timers.get_minutes(static_cast<TimerSlot>(i)), 1110);
+  }
   f.command([](auto &call) { call.set_mode(climate::CLIMATE_MODE_OFF); });
   EXPECT_EQ(f.last_state()[13] & 8, 0);
+  EXPECT_EQ(f.last_state()[23], 0x89);
+}
+
+class PendingTimers : public RkrTimers {
+ public:
+  using RkrTimers::RkrTimers;
+  using RkrTimers::process_pending_;
+};
+
+TEST(PanasonicTimers, ApplyAllSendsFourSeparateOperationsAndStopsOnInvalidClock) {
+  Fixture f(Model::RKR);
+  TimerClock clock;
+  PendingTimers timers(&f.climate, &clock);
+  timers.setup();
+  EXPECT_FALSE(timers.apply_all());
+  clock.epoch = 1767598198;
+  ASSERT_TRUE(timers.apply_all());
+  EXPECT_TRUE(f.transmitter.frames.empty());
+  for (uint8_t i = 0; i < 4; i++) {
+    timers.process_pending_();
+    ASSERT_EQ(f.transmitter.frames.size(), i + 1);
+    const auto fields = decode_rkr_timers(f.last_state().data());
+    EXPECT_EQ(fields.on_slot2, i == 1);
+    EXPECT_EQ(fields.off_slot2, i == 3);
+    EXPECT_EQ(fields.on_minutes == TIMER_TIME_SPECIAL, i >= 2);
+    EXPECT_EQ(fields.off_minutes == TIMER_TIME_SPECIAL, i < 2);
+  }
+  timers.process_pending_();
+  EXPECT_EQ(f.transmitter.frames.size(), 4);
+  ASSERT_TRUE(timers.apply_all());
+  timers.process_pending_();
+  clock.epoch = 0;
+  timers.process_pending_();
+  clock.epoch = 1767598198;
+  timers.process_pending_();
+  EXPECT_EQ(f.transmitter.frames.size(), 5);
+}
+
+TEST(PanasonicTimers, IndependentOperationsCoverEveryTimeSlotAndEnableCombination) {
+  for (uint8_t slot = 0; slot < 4; slot++) {
+    for (uint16_t minutes = 0; minutes < 1440; minutes += 10) {
+      for (const bool enabled : {false, true}) {
+        RkrTimerFields fields;
+        ASSERT_TRUE(make_rkr_timer_operation(static_cast<TimerSlot>(slot), minutes, enabled, 1439, fields));
+        uint8_t bytes[STATE_LENGTH];
+        memcpy(bytes, TIMER_CAPTURES[0], STATE_LENGTH);
+        ASSERT_TRUE(encode_rkr_timers(fields, bytes));
+        const auto decoded = decode_rkr_timers(bytes);
+        EXPECT_EQ(decoded.on_minutes, slot < 2 ? minutes : TIMER_TIME_SPECIAL);
+        EXPECT_EQ(decoded.off_minutes, slot < 2 ? TIMER_TIME_SPECIAL : minutes);
+        EXPECT_EQ(decoded.on_enabled, slot < 2 ? enabled : true);
+        EXPECT_EQ(decoded.off_enabled, slot < 2 ? true : enabled);
+        EXPECT_EQ(decoded.on_slot2, slot == 1);
+        EXPECT_EQ(decoded.off_slot2, slot == 3);
+        EXPECT_EQ(bytes[23], 0x80);
+        EXPECT_EQ(bytes[25], 5 | (slot == 1 ? 0x40 : 0) | (slot == 3 ? 0x80 : 0));
+        EXPECT_EQ(bytes[19] & 8, 8);
+        EXPECT_EQ(bytes[20] & 0x80, 0x80);
+        EXPECT_EQ(bytes[26], calc_checksum(bytes, STATE_LENGTH));
+      }
+    }
+  }
+  RkrTimerFields fields;
+  EXPECT_FALSE(make_rkr_timer_operation(static_cast<TimerSlot>(4), 360, true, 0, fields));
+  EXPECT_FALSE(make_rkr_timer_operation(TimerSlot::TIMER_SLOT_ON1, TIMER_TIME_SPECIAL, false, 0, fields));
+  EXPECT_FALSE(make_rkr_timer_operation(TimerSlot::TIMER_SLOT_ON1, 361, true, 0, fields));
+  EXPECT_FALSE(make_rkr_timer_operation(TimerSlot::TIMER_SLOT_ON1, 360, true, 1440, fields));
+}
+
+TEST(PanasonicTimers, OppositePreservationIgnoresAllRememberedEnableCombinations) {
+  for (uint8_t enables = 0; enables < 16; enables++) {
+    Fixture f(Model::RKR);
+    TimerClock clock;
+    RkrTimers timers(&f.climate, &clock);
+    timers.setup();
+    for (uint8_t i = 0; i < 4; i++) {
+      timers.set_minutes(static_cast<TimerSlot>(i), 60 * (i + 1));
+      timers.set_enabled(static_cast<TimerSlot>(i), enables & (1U << i));
+    }
+    EXPECT_TRUE(f.transmitter.frames.empty());
+    clock.epoch = 1767598198;
+    for (uint8_t target = 0; target < 4; target++) {
+      ASSERT_TRUE(timers.apply(static_cast<TimerSlot>(target)));
+      const auto fields = decode_rkr_timers(f.last_state().data());
+      EXPECT_EQ(target < 2 ? fields.on_enabled : fields.off_enabled, (enables & (1U << target)) != 0);
+      EXPECT_TRUE(target < 2 ? fields.off_enabled : fields.on_enabled);
+      EXPECT_EQ(target < 2 ? fields.off_minutes : fields.on_minutes, TIMER_TIME_SPECIAL);
+      for (uint8_t i = 0; i < 4; i++) {
+        EXPECT_EQ(timers.get_enabled(static_cast<TimerSlot>(i)), (enables & (1U << i)) != 0);
+        EXPECT_EQ(timers.get_minutes(static_cast<TimerSlot>(i)), 60 * (i + 1));
+      }
+    }
+  }
+}
+
+TEST(PanasonicTimers, MigratesLegacySlotTwoIntentWithoutTransmission) {
+  Fixture f(Model::RKR);
+  TimerClock clock;
+  struct LegacySettings {
+    uint16_t on_minutes;
+    uint16_t off_minutes;
+    uint8_t on_enabled;
+    uint8_t off_enabled;
+  };
+  auto preference = f.climate.make_entity_preference<LegacySettings>(0x524B5201);
+  const LegacySettings old{1020, 130, 1, 1};
+  ASSERT_TRUE(preference.save(&old));
+  RkrTimers timers(&f.climate, &clock);
+  timers.setup();
+  EXPECT_EQ(timers.get_minutes(TimerSlot::TIMER_SLOT_ON2), 1020);
+  EXPECT_EQ(timers.get_minutes(TimerSlot::TIMER_SLOT_OFF2), 130);
+  EXPECT_TRUE(timers.get_enabled(TimerSlot::TIMER_SLOT_ON2));
+  EXPECT_TRUE(timers.get_enabled(TimerSlot::TIMER_SLOT_OFF2));
+  EXPECT_FALSE(timers.get_enabled(TimerSlot::TIMER_SLOT_ON1));
+  EXPECT_FALSE(timers.get_enabled(TimerSlot::TIMER_SLOT_OFF1));
+  timers.set_minutes(TimerSlot::TIMER_SLOT_ON1, 420);
+  timers.set_enabled(TimerSlot::TIMER_SLOT_OFF1, true);
+  RkrTimers restored(&f.climate, &clock);
+  restored.setup();
+  EXPECT_EQ(restored.get_minutes(TimerSlot::TIMER_SLOT_ON1), 420);
+  EXPECT_TRUE(restored.get_enabled(TimerSlot::TIMER_SLOT_OFF1));
+  EXPECT_EQ(restored.get_minutes(TimerSlot::TIMER_SLOT_ON2), 1020);
+  EXPECT_TRUE(f.transmitter.frames.empty());
 }
 
 TEST(PanasonicTimers, EntitiesRestoreSilentlyAndRejectUnsupportedResolution) {
@@ -1321,20 +1493,23 @@ TEST(PanasonicTimers, EntitiesRestoreSilentlyAndRejectUnsupportedResolution) {
   EXPECT_FALSE(decode_rkr_timers(f.last_state().data()).on_enabled);
 }
 
-TEST(PanasonicTimers, RefusesOtherModelsAndSlotOneThroughClimateEntryPoint) {
+TEST(PanasonicTimers, RefusesOtherModelsAndNonIndependentOperations) {
+  RkrTimerFields fields;
+  ASSERT_TRUE(make_rkr_timer_operation(TimerSlot::TIMER_SLOT_ON1, 360, true, 735, fields));
   for (const auto model : {Model::DKE, Model::JKE, Model::LKE, Model::NKE, Model::CKP, Model::PKE}) {
     Fixture f(model);
-    EXPECT_FALSE(f.climate.send_timer_state(RkrTimerFields{}));
+    EXPECT_FALSE(f.climate.send_timer_state(fields));
     EXPECT_TRUE(f.transmitter.frames.empty());
   }
   Fixture f(Model::RKR);
-  RkrTimerFields fields;
-  fields.on_slot2 = false;
+  EXPECT_TRUE(f.climate.send_timer_state(fields));
+  EXPECT_FALSE(f.climate.send_timer_state(RkrTimerFields{}));
+  fields.off_enabled = false;
   EXPECT_FALSE(f.climate.send_timer_state(fields));
-  fields.on_slot2 = true;
-  fields.off_slot2 = false;
+  fields.off_enabled = true;
+  fields.on_unknown_flag = false;
   EXPECT_FALSE(f.climate.send_timer_state(fields));
-  EXPECT_TRUE(f.transmitter.frames.empty());
+  EXPECT_EQ(f.transmitter.frames.size(), 1);
 }
 
 TEST(PanasonicTimers, UsesLocalClockIncludingSydneyDaylightSaving) {
@@ -1361,13 +1536,91 @@ TEST(PanasonicTimers, UsesLocalClockIncludingSydneyDaylightSaving) {
   timers.setup();
   // 2026-01-05 07:29:58 UTC -> 18:29 AEDT; clock minutes are not rounded to timer resolution.
   clock.epoch = 1767598198;
-  EXPECT_TRUE(timers.apply());
+  EXPECT_TRUE(timers.apply(TimerSlot::TIMER_SLOT_ON2));
   EXPECT_EQ(decode_rkr_timers(f.last_state().data()).clock_minutes, 1109);
   // 2026-07-05 07:29:58 UTC -> 17:29 AEST.
   clock.epoch = 1783236598;
-  EXPECT_TRUE(timers.apply());
+  EXPECT_TRUE(timers.apply(TimerSlot::TIMER_SLOT_ON2));
   EXPECT_EQ(decode_rkr_timers(f.last_state().data()).clock_minutes, 1049);
   time::set_global_tz(previous);
+}
+
+static const uint8_t RKR_OFF_ON1_RETAINED[STATE_LENGTH] = {0x02, 0x20, 0xE0, 0x04, 0,    0,    0,    6,    0x02,
+                                                           0x20, 0xE0, 0x04, 0,    0x6A, 0x36, 0x80, 0xAF, 0x0D,
+                                                           0,    0x0E, 0xE0, 0,    0,    0x89, 0,    0,    0x59};
+static const uint8_t RKR_OFF_ON1_CANCELLED[STATE_LENGTH] = {0x02, 0x20, 0xE0, 0x04, 0,    0,    0,    6,    0x02,
+                                                            0x20, 0xE0, 0x04, 0,    0x68, 0x36, 0x80, 0xAF, 0x0D,
+                                                            0,    0x0E, 0xE0, 0,    0,    0x89, 0,    0,    0x57};
+static const uint8_t RKR_ON1_SET[STATE_LENGTH] = {0x02, 0x20, 0xE0, 0x04, 0,    0,    0,    6,    0x02,
+                                                  0x20, 0xE0, 0x04, 0,    0x6A, 0x36, 0x80, 0xAF, 0x0D,
+                                                  0x68, 0x89, 0xD7, 0,    0,    0x80, 0xDF, 2,    0x0B};
+
+TEST(PanasonicProtocol, OrdinaryRkrEnableFlagsAreKnownWithoutMaskingUnknownFields) {
+  for (const auto *bytes : {RKR_OFF_ON1_RETAINED, RKR_OFF_ON1_CANCELLED}) {
+    auto command = decode_command(capture(bytes));
+    EXPECT_EQ(classify_command(command, Model::RKR), CommandStatus::COMMAND_STATUS_VALID_KNOWN);
+    EXPECT_TRUE(has_rkr_ordinary_timer_fields(command));
+    const auto timers = decode_rkr_timers(command.bytes);
+    EXPECT_EQ(timers.on_minutes, TIMER_TIME_SPECIAL);
+    EXPECT_EQ(timers.off_minutes, TIMER_TIME_SPECIAL);
+    EXPECT_EQ(timers.clock_minutes, 0);
+    EXPECT_EQ(command.bytes[26], calc_checksum(command.bytes, 27));
+    for (const size_t index : {13, 15, 21, 22, 23, 25}) {
+      auto unknown = command;
+      unknown.bytes[index] ^= 0x80;
+      unknown.bytes[26] = calc_checksum(unknown.bytes, 27);
+      EXPECT_EQ(classify_command(unknown, Model::RKR), CommandStatus::COMMAND_STATUS_VALID_UNKNOWN) << index;
+    }
+    command.bytes[26] ^= 1;
+    EXPECT_EQ(classify_command(command, Model::RKR), CommandStatus::COMMAND_STATUS_INVALID_CHECKSUM);
+  }
+  EXPECT_EQ(RKR_OFF_ON1_RETAINED[13] ^ RKR_OFF_ON1_CANCELLED[13], 2);
+  for (size_t i = 0; i < 26; i++)
+    if (i != 13)
+      EXPECT_EQ(RKR_OFF_ON1_RETAINED[i], RKR_OFF_ON1_CANCELLED[i]);
+}
+
+TEST(PanasonicProtocol, GenuineOn1SetCaptureAndIntentionallyCorruptedClock) {
+  auto set = decode_command(capture(RKR_ON1_SET));
+  EXPECT_EQ(set.bytes[26], 0x0B);
+  EXPECT_EQ(calc_checksum(set.bytes, 27), 0x0B);
+  EXPECT_FALSE(has_rkr_ordinary_timer_fields(set));
+  EXPECT_EQ(classify_command(set, Model::RKR), CommandStatus::COMMAND_STATUS_VALID_UNKNOWN);
+  auto timers = decode_rkr_timers(set.bytes);
+  EXPECT_EQ(timers.on_minutes, 360);
+  EXPECT_EQ(timers.off_minutes, 1400);
+  // Captured at 12:15:20; the clock field contains minutes, not seconds.
+  EXPECT_EQ(timers.clock_minutes, 735);
+  EXPECT_TRUE(timers.on_enabled);
+  EXPECT_FALSE(timers.off_enabled);
+  Fixture f(Model::RKR);
+  EXPECT_TRUE(f.receive(capture(RKR_ON1_SET)));
+
+  // Intentionally corrupted negative fixture, originating from a handover transcription error.
+  auto corrupted = set;
+  corrupted.bytes[24] = 0xCE;
+  EXPECT_EQ(corrupted.bytes[26], 0x0B);
+  EXPECT_EQ(calc_checksum(corrupted.bytes, 27), 0xFA);
+  EXPECT_EQ(classify_command(corrupted, Model::RKR), CommandStatus::COMMAND_STATUS_INVALID_CHECKSUM);
+  EXPECT_FALSE(f.receive(capture(corrupted.bytes)));
+}
+
+TEST(PanasonicTimers, OrdinaryRemoteEnableBitsNeverChangeHaIntentOrPreservationPolicy) {
+  Fixture f(Model::RKR);
+  TimerClock clock;
+  RkrTimers timers(&f.climate, &clock);
+  timers.setup();
+  for (const auto *bytes : {RKR_OFF_ON1_RETAINED, RKR_OFF_ON1_CANCELLED, RKR_ON1_SET}) {
+    ASSERT_TRUE(f.receive(capture(bytes)));
+    EXPECT_FALSE(timers.get_enabled(TimerSlot::TIMER_SLOT_ON2));
+    EXPECT_FALSE(timers.get_enabled(TimerSlot::TIMER_SLOT_OFF2));
+    f.command([](auto &call) { call.set_mode(climate::CLIMATE_MODE_COOL); });
+    EXPECT_EQ(f.last_state()[13] & 0x0E, 0);
+    f.climate.set_vane_position(2);
+    EXPECT_EQ(f.last_state()[13] & 8, 0);
+    f.command([](auto &call) { call.set_mode(climate::CLIMATE_MODE_OFF); });
+    EXPECT_EQ(f.last_state()[13] & 8, 0);
+  }
 }
 
 }  // namespace esphome::panasonic_ir::testing

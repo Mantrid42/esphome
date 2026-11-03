@@ -36,6 +36,8 @@ static constexpr size_t SHORT_COMMAND_LENGTH = 16;
 static constexpr size_t SECTION1_LENGTH = 8;
 static constexpr size_t SECTION2_LENGTH = STATE_LENGTH - SECTION1_LENGTH;
 static constexpr uint8_t CHECKSUM_INIT = 0xF4;
+// Special timer value, not minutes since midnight. RKR ON1 observations are documented in PROTOCOL.md.
+static constexpr uint16_t TIMER_TIME_SPECIAL = 0x600;
 
 // PKE is not an IRremoteESP8266 model: it is JKE with B13 b3 set, as sent by the remote of a CS-NE9PKE (CWA75C4410).
 enum class Model : uint8_t { DKE, JKE, LKE, NKE, CKP, RKR, PKE };

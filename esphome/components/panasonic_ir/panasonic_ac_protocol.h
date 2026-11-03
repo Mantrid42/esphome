@@ -59,6 +59,13 @@ inline ShortAction short_action(const Command &command, Model model) {
   }
 }
 
+/// Timer/clock layout observed in ordinary RKR commands; not proof of a general B23 command discriminator.
+inline bool has_rkr_ordinary_timer_fields(const Command &command) {
+  const auto *b = command.bytes;
+  return command.complete && command.length == STATE_LENGTH && b[18] == 0 && b[19] == 0x0E && b[20] == 0xE0 &&
+         b[23] == 0x89 && b[24] == 0 && b[25] == 0;
+}
+
 inline CommandStatus classify_command(const Command &command, Model model) {
   if (!has_panasonic_prefix(command.bytes, command.length))
     return CommandStatus::COMMAND_STATUS_UNRELATED;
@@ -82,7 +89,12 @@ inline CommandStatus classify_command(const Command &command, Model model) {
     return CommandStatus::COMMAND_STATUS_VALID_UNKNOWN;
   uint8_t expected[STATE_LENGTH];
   encode_frame(params, expected);
-  // Only claim a fully known encoding for the exact operating-state template we generate.
+  if (model == Model::RKR && has_rkr_ordinary_timer_fields(command)) {
+    // Enable bits are known fields, even though OFF1 symmetry is not hardware-verified. Compare every other bit.
+    expected[13] |= command.bytes[13] & 0x06;
+    expected[26] = calc_checksum(expected, STATE_LENGTH);
+  }
+  // Known encoding does not imply every flag's physical effect has been verified.
   return memcmp(expected, command.bytes, STATE_LENGTH) == 0 ? CommandStatus::COMMAND_STATUS_VALID_KNOWN
                                                             : CommandStatus::COMMAND_STATUS_VALID_UNKNOWN;
 }

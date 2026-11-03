@@ -90,7 +90,7 @@ This identifies the first batch's alternating short-command burst as ECONAVI, wi
 
 `panasonic_ac_protocol.h` classifies captures independently of climate-state decoding. DEBUG logs under
 `panasonic_ir.protocol` include bytes, length, both section checksums and the recognised action or fields.
-"Known encoding" means an exact supported transmit template or an identified RKR short action; it does
+"Known encoding" means a supported transmit template (including recognised RKR ordinary-command timer enable bits) or an identified RKR short action; it does
 not mean every constant bit has a proven physical meaning. Other checksum-valid encodings are explicitly
 marked as containing unknown fields. Valid full frames can update supported climate fields even when
 additional fields are unknown. Invalid checksums, malformed captures and short commands never update
@@ -133,76 +133,242 @@ This is a diagnostic API, not a timer-control entity. Keep the generic `send_pro
 `dump: all` for timing investigations. No hardware transmission or flashing is performed by unit tests.
 
 
-## Experimental HA-owned slot 2 timers
+## Independent HA timer operations (current implementation)
 
-The local implementation addresses ON2 and OFF2 only. Ordinary climate and vane writes still use
-B13.3=0, regardless of desired timer state. There is deliberately no always-update switch yet.
-No short independent timer programming command is established by our captures or the reviewed DKE
-research. Timer writes therefore carry the component's current full operating state, including power,
-mode, fan, temperature and vanes. They are not isolated timer-only commands. Remote-only features such
-as MILD DRY/iAUTO-X are not retained by the normal climate encoder, and may be affected by a timer write.
-
-The four new SET captures establish packing: ON1 06:00/OFF 23:30, ON2 17:00/OFF 23:30,
-OFF1 23:30/ON 06:00, OFF2 02:10/ON 06:00. They decode clock candidates as 20:28, 20:27,
-20:37 and 20:37. The remote clock was not recorded. The user's sequences added a second timer of the
-same kind while the first was already configured; persistence of the first timer was not observed by
-waiting for it to fire. Both candidate update flags are set in every SET capture. There is no captured
-combined ON2+OFF2 write and no verified individual disable capture.
+All four timers ON1, ON2, OFF1 and OFF2 are individually addressable. HA stores requested state,
+not confirmed indoor-unit state, and does not import timer settings from received remote frames.
+Ordinary climate and vane writes keep B13.3=0 and B23=89 regardless of the requested timers.
+There is no automatic timer synchronization on climate changes, boot, clock sync or DST changes.
 
 ### Wire policy
 
-Every explicit HA timer operation sends one full frame with both slot selectors set. B13 bits 1 and 2
-carry desired ON2/OFF2 enables; bit 3 is set. B18 and B19.0..2 hold ON minutes. B19.4..7 and B20.0..6
-hold OFF minutes. B19.3 and B20.7 are both set, matching the SET captures; independent effects are unknown.
-B24 and B25.0..2 hold local clock minutes. B25.6 and B25.7 are both set; B25.3..5 are preserved from the
-base operating frame. B26 is regenerated. Times are retained in the frame even when disabled: this is a
-hypothesis for cancelling only the selected slot, not a verified cancellation command.
+Every explicit operation sends one full operating-state frame with B23=80 and B13.3=1.
+The target type carries its requested enable and remembered time; disabling retains that time.
+The opposite type always carries enable=1 and time=0x600, preserving its unknown existing state.
+The opposite selector is kept at slot 1, matching the tested ON1/OFF1 preservation contexts.
+The other slot of the target type is not selected. Hardware findings supporting this policy and
+remaining limits are recorded below; unit tests cannot prove stored execution times are unchanged.
 
-`encode_rkr_timers` patches just these fields and supports separate selectors/update flags for tests
-and future policy changes. `RkrTimers` owns the HA state and always chooses slot 2 for both directions.
-`PanasonicIrClimate::send_timer_state` refuses non-RKR models and any slot-1 selection. It does not
-change the normal frame policy. No timer fields are imported into HA's desired state from remote IR.
+| Target | ON field | OFF field | B25 selector bits (excluding clock) |
+| --- | --- | --- | --- |
+| ON1 | Requested time/enable | Preserve: enable=1, 0x600 | 00 |
+| ON2 | Requested time/enable | Preserve: enable=1, 0x600 | 40 |
+| OFF1 | Preserve: enable=1, 0x600 | Requested time/enable | 00 |
+| OFF2 | Preserve: enable=1, 0x600 | Requested time/enable | 80 |
+
+B18 and B19.0..2 encode ON minutes; B19.4..7 and B20.0..6 encode OFF minutes.
+B19.3 and B20.7 are always 1 in generated independent operations, matching the remote. They are
+**unknown timer-adjacent flags**, not established update flags. Raw encoding/decoding helpers retain
+both values for capture regression tests; the climate transmission entry point rejects cleared flags
+and requests that do not preserve exactly one opposite timer type.
+B24 and B25.0..2 encode current local clock minutes. B25.3..5 retain the normal frame values.
+B26 is recalculated after all fields, including B23, are set.
+
+`make_rkr_timer_operation` builds the independent-operation policy; `encode_rkr_timers` packs raw
+fields; `RkrTimers` owns requested state. This separates protocol packing from the HA policy.
+The HA operation builder accepts only valid ten-minute target times, never special target times,
+so cancellation does not use the untested ON cancellation variant with 0x600.
+
+These are full frames carrying current climate power/mode, temperature and vane/fan state.
+Independent timer programming with short frames has not been established. Unknown remote-only
+operating settings, such as MILD DRY/iAUTO-X, can still be affected by full-frame transmission.
 
 ### Controls, restoration and clock
 
-The optional `panasonic_ir` controller takes `climate_id` and `time_id`. Its datetime and switch
-platforms select `timer: ON2` or `OFF2`. The button platform exposes `apply_timers`.
-The development YAML names switches "ON2 enabled (requested)" and "OFF2 enabled (requested)";
-they advertise assumed state, not physical acknowledgement. Both default disabled. Initial times are
-06:00 and 23:30. The two times and enables are saved together using the climate entity's preferences.
-Normal ESPHome preference flush rules apply, so an immediate power loss can lose recent edits.
+The datetime and switch platforms accept `timer: ON1`, `ON2`, `OFF1` or `OFF2`. A time change or
+switch write applies only that slot, even when its value is unchanged (allowing an explicit retry).
+A time change while disabled sends cancellation with the new remembered time. Times must be valid
+HH:00/10/20/30/40/50 with zero seconds; invalid inputs are rejected and the previous time republished.
+Switches expose assumed/requested state; labels in the example YAML make this distinction explicit.
+Default times are 06:00 for ON slots and 23:30 for OFF slots, all disabled.
 
-Changing either time or enable, including setting a disabled timer's time, sends both intended slots.
-Applying unchanged values also sends, allowing a deliberate retry. Enabling does not choose a time
-from the remote. Disabling one retains that timer's configured time and clears its enable bit while
-applying the other HA slot exactly as remembered. The Apply button resends the same pair with a fresh
-clock. Times must have zero seconds and minutes divisible by ten; unsupported values are rejected and
-the existing value is republished, with no transmission. There is no silent rounding.
+The button platform has optional `apply_on1`, `apply_on2`, `apply_off1`, `apply_off2` and
+`apply_timers` entries. The existing `apply_timers` key is retained, now labelled **Apply All HA Timers**
+in the example. It schedules ON1, ON2, OFF1, OFF2 as four separate operations, one per one-second
+scheduler interval. The first callback follows the scheduler's normal initial interval offset.
+The sequence uses current requested settings and the local clock at each step; repeated Apply All
+restarts/coalesces the pending sequence. An individual apply removes that slot from a pending batch.
+The interval is cancelled after completion or failure; invalid clock aborts the rest without retry.
+The spacing is an implementation choice awaiting hardware validation, not a protocol guarantee.
 
-Restoration only publishes desired state. There are no boot, time-sync or periodic IR automations.
-A write with an invalid clock saves intent but sends nothing; use Apply once the HA clock is valid.
-The clock uses `RealTimeClock::now()` (local time including DST), at one-minute resolution, not rounded
-to ten minutes. The development config explicitly uses `Australia/Sydney` with Home Assistant time.
-DST changes are reflected in subsequent writes, not automatically sent to the unit; reapply after a
-clock/DST change if the indoor unit does not adjust itself. The physical interpretation of the clock
-field still needs a capture with the remote clock recorded.
+Preferences use a new four-slot layout and migrate the old ON2/OFF2 intent when no valid new layout
+exists. ON1/OFF1 start disabled on migration. Restoration and migration do not send or queue IR.
+An invalid clock prevents transmission but leaves requested settings saved for a later explicit apply.
+The configured Home Assistant clock uses `now()` in local time (Australia/Sydney in the example),
+including DST. Clock minutes are not rounded to timer resolution; seconds are not transmitted.
 
-### Hardware experiments required before relying on slot-1 isolation
+TX logs show both selected slot fields, requested times/enables or explicit preservation, local clock,
+B13/B19/B20/B23/B25, unknown flags and the entire frame. RX logs retain raw values and unknown-field/
+checksum checks; identifying a timer-command context does not mark every byte as understood.
 
-1. With the ESP transmitter shielded, inspect the native timer logs and receiver capture: compare
-   bytes/checksum for ON2-only, OFF2-only, both enabled and both disabled; record the remote clock in
-   a fresh SET capture. Confirm ten-minute timer inputs and the minute-accurate local clock.
-2. Arm an imminent slot-1 ON timer using the remote, then apply an enabled slot-2 pair. Wait for ON1
-   to execute. Repeat for OFF1. An indicator or a beep alone cannot establish preservation.
-3. Keep both slot-1 timers armed; disable only ON2, then only OFF2. Verify each selected timer stops
-   executing, the other HA timer retains its intended behavior, and both remote timers still execute.
-4. Compare a combined ON2+OFF2 frame with individual SET operations, including midnight and opposite
-   orderings of ON/OFF times. Test initially disabled slots as well as already active ones.
-5. Repeat from COOL, FAN, OFF and AUTO/iAUTO-X, recording mode/fan/vanes and feature indicators.
-   B25.7 collides with our iAUTO-X candidate; do not infer feature isolation from its timer selector use.
-6. Only if necessary, vary B19.3 and B20.7 one at a time while keeping other bytes fixed, and test
-   whether the clock needs refreshing across DST. Do not enable automatic timer updates until the
-   selected-slot and disable behaviors are established.
+The following sections retain the hardware evidence and earlier combined-slot experiment history.
 
-Slot 1 is expected to be unselected by the proposed encoding, but preservation is **not guaranteed**
-by any current capture or unit test. Tests prove bytes and software behavior, not indoor-unit semantics.
+## Controlled ON1 preservation/cancellation experiment (2026-11-03)
+
+The head unit initially had ON1 programmed and its timer indicator lit. An original-remote OFF command
+with ON1 enabled left the indicator lit. The user then covered the remote and cancelled its timers,
+so the head unit did not receive that cancellation. A second OFF command, now with the remote's ON
+flag clear, extinguished the head unit's timer indicator.
+
+Preserved (indicator remained lit):
+
+```text
+02 20 E0 04 00 00 00 06 02 20 E0 04 00 6A 36 80 AF 0D 00 0E E0 00 00 89 00 00 59
+```
+
+Cancelled (indicator went out):
+
+```text
+02 20 E0 04 00 00 00 06 02 20 E0 04 00 68 36 80 AF 0D 00 0E E0 00 00 89 00 00 57
+```
+
+These valid frames differ only in B13.1 and the resulting checksum. Both have B13.3=1,
+ON/OFF time fields 0x600, clock 0x000 and B23=89. In this tested ON1 context, setting the ON
+flag preserved the existing timer and clearing it cancelled it. In an additional test where SET was
+shielded and no ON timer had been programmed in the indoor unit, an ordinary OFF with ON enabled,
+0x600 time and zero clock did not activate a timer. The special time did not replace the retained ON1
+time. These are reported hardware observations; OFF1 symmetry and effects on other slots are unverified.
+
+The special value is independently named `kPanasonicAcTimeSpecial = 0x600` in
+[IRremoteESP8266](https://github.com/crankyoldgit/IRremoteESP8266/blob/master/src/ir_Panasonic.h).
+"No new timer time supplied" is a useful interpretation of these ON1 observations, not a proven
+universal definition. It is not a normal minutes-since-midnight value and does not imply disabled.
+
+Explicit ON1 SET capture at 12:15:20:
+
+```text
+02 20 E0 04 00 00 00 06 02 20 E0 04 00 6A 36 80 AF 0D 68 89 D7 00 00 80 DF 02 0B
+```
+
+The genuine capture encodes ON=06:00, OFF=23:20 and raw clock=0x2DF (735 minutes, 12:15),
+with valid checksum 0B. The clock field does not include the captured seconds (:20).
+The earlier handover contained a transcription error, CE instead of DF; that was not a hardware
+capture error. The CE 02 0B combination is retained only as an intentionally corrupted negative
+checksum test (calculated checksum FA). Unlike the ordinary OFF,
+this SET has B23=80 and actual timer/clock fields. That pair alone did not isolate B23; the later
+controlled OFF2 cancellation experiment below does.
+
+Diagnostics now recognise ON/OFF enable bits within the otherwise exact RKR ordinary transmit template.
+This is a field-classification allowance, not proof that OFF1 behaves symmetrically. Every other byte,
+reserved bit and checksum is still checked. Valid unmodelled encodings retain the unknown-field
+classification, including the valid SET capture. The intentionally corrupted variant is rejected
+for its checksum. A zero clock matching the ordinary RKR timer-field pattern is explicitly reported as
+not supplying the remote's current clock, rather than asserting midnight. Other clock values remain
+raw candidates: a zero alone cannot distinguish a placeholder from genuine midnight.
+
+### Effect on HA slot 2 and next experiments
+
+No transmission policy changes follow from this evidence. Normal climate and vane commands keep
+B13.3=0, including after hearing either ordinary OFF or SET from the remote, and never copy remote
+enables into HA's desired slot-2 state. The new experiment isolates B13.1 with B13.3 held at one; it
+does not independently prove B13.3's meaning. Earlier hardware tests remain the basis for clearing it.
+
+At this stage the experimental implementation sent both slot-2 selectors and real times for both types.
+That policy is superseded by the independent-operation policy above. The B23 correction below remains.
+The ON1 result with special time does not prove how disabling a selected slot with a real time works.
+
+Retain the planned slot-1 isolation, combined slot-2, individual disable and iAUTO-X tests. Add:
+(1) the equivalent controlled OFF1 experiment; (2) extend the now-completed B23 cancellation comparison
+to timer programming; (3) compare special-time and real-time enable/disable behavior
+with both previously programmed and absent timers; (4) record the displayed remote clock alongside
+SET and ordinary OFF captures, including a genuine midnight SET if practical. Only perform these
+hardware experiments with user approval. C++ tests establish classification, packing and preservation
+policy; they do not simulate or prove indoor-unit timer effects.
+
+
+## Controlled B23 and selective OFF2 cancellation experiments
+
+The user programmed OFF1 with this command (checksum omitted; the transmitter calculated it):
+
+```text
+02 20 E0 04 00 00 00 06 02 20 E0 04 00 6D 36 80 A1 06 68 89 D7 00 00 80 91 03
+```
+
+Then this experimental OFF2 cancellation preserved OFF1:
+
+```text
+02 20 E0 04 00 00 00 06 02 20 E0 04 00 69 36 80 A1 06 68 29 D8 00 00 80 90 C3
+```
+
+Changing only B23 from 80 to 89 (with a recalculated checksum) cancelled OFF1. This isolates
+B23's effect in this tested command, but does not establish meanings for its individual bits.
+Original-remote timer SET/CANCEL captures consistently use 80; ordinary commands use 89.
+
+Additional B23 values were tested with the other command fields unchanged:
+
+| B23 | Reported hardware result |
+| --- | --- |
+| 80 | OFF1 preserved |
+| 81, 82, 88, 90, A0, C0, 01, 02, 04, 08 | OFF1 cancelled |
+| 84 | No beep on repeated attempts; apparently ignored; programming also unsuccessful |
+
+The B13=69, B23=80, B25=C3 cancellation was tested with three initial configurations:
+
+| Initially enabled | Timer indicator after cancellation |
+| --- | --- |
+| OFF1 only | Remained on |
+| OFF2 only | Went out |
+| OFF1 and OFF2 | Remained on |
+
+The single-slot tests strongly support selective OFF2 cancellation preserving OFF1. The shared
+indicator in the combined test does not independently establish every stored slot's state.
+B25=C3 is therefore not necessarily invalid. Combined ON2/OFF2 operation remains unverified.
+
+### Earlier combined-slot implementation (superseded)
+
+At this stage, explicit HA timer operations now set B23=80 in the shared timer encoder, before the checksum.
+This covers enable/disable, time changes and Apply HA Timers. Ordinary RKR climate and vane
+transmissions keep B23=89 and B13.3=0. Other models and model defaults are unchanged.
+Both slot-2 selectors remain set: B25 is C3 for the tested 0x390 clock; its low three bits still
+encode the current local clock's high bits, so the complete byte varies with the clock.
+RX diagnostics label B23=80 with B13.3=1 as the observed timer-command context, without treating
+that byte alone as proof that all other fields are understood. Unknown-field/checksum checks remain.
+Controls, restoration without transmission, time validation and local/DST clock handling are unchanged.
+
+Still verify on hardware: programming OFF2; programming ON2; enabling both together; disabling
+one while preserving the other; preserving remote-owned slot-1 timers across slot-2 operations;
+and absence of unexpected mode or other operating-state changes. Successful HA timer programming
+is not established by the cancellation results. The bit-level meaning of B23, update flags and
+any iAUTO-X interaction remain unresolved. Tests verify bytes and software behavior, not these
+physical effects. No further hardware commands are authorised by this implementation change.
+
+
+## Independent preservation findings
+
+With B23=80 and B13.3=1, hardware tests now support:
+
+| Enable | Timer field | Observed effect |
+| --- | --- | --- |
+| 0 | Valid time | Cancel selected timer |
+| 0 | 0x600 | Cancel selected OFF timer (ON variant not tested) |
+| 1 | Valid time | Enable/program selected timer |
+| 1 | 0x600 | Preserve existing timer without supplying a new time |
+
+OFF1 set by the remote survived an ON2 cancellation carrying OFF enable=1/time=0x600, with
+B20.7 either zero or one. ON1 set by the remote survived an OFF2 cancellation carrying ON
+enable=1/time=0x600, with B19.3 either zero or one. An absent OFF timer did not become enabled
+from enable=1/time=0x600. Earlier ordinary-command tests also found no activation of an absent ON
+timer with the special value. Preservation is not programming and 0x600 is not midnight.
+
+OFF programming, cancellation and preservation worked with either value of B20.7; ON preservation
+worked with either value of B19.3. Their bit-level purpose remains unknown. All examined original
+remote SET/CANCEL and ordinary captures have both bits set, so production operations keep them set.
+Previously used labels claiming timer-update flags came from DKE research and are not RKR conclusions.
+
+Slot selection is ON1/ON2 via B25.6 and OFF1/OFF2 via B25.7. The selective OFF2 cancellation results
+above support leaving OFF1 unselected; the shared indicator cannot verify every stored timer time.
+The new implementation replaces simultaneous ON2/OFF2 writes with individual operations and explicit
+opposite-type preservation. General independence across every state combination still needs validation.
+
+### Next hardware validation
+
+- Program and cancel each of ON1, ON2, OFF1 and OFF2; record complete TX logs and actual execution.
+- Verify the stored execution times of all three non-target slots, including remote-programmed timers.
+- Test all four simultaneously and Apply All's four-frame sequence, including its one-second spacing.
+- Check execution across midnight and daylight-saving transitions, with no automatic resynchronization.
+- Check full-frame timer updates when the AC has operating settings unknown to HA.
+- ON cancellation with a special target time remains untested and is not used by this implementation.
+
+No new raw capture bytes were supplied for these preservation experiments. Tests assert the specified
+packing and software policy, alongside existing genuine capture fixtures; generated frames are not
+labelled as physical captures. Hardware actions require separate user approval.

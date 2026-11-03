@@ -52,9 +52,9 @@ static const LogString *mode_name(uint8_t mode) {
   }
 }
 
-static void log_time(const LogString *name, uint16_t minutes) {
-  if (minutes == 0x600) {
-    ESP_LOGD(TAG, "  %s: unset/unknown (0x600)", LOG_STR_ARG(name));
+static void log_time(const LogString *name, uint16_t minutes, bool timer_field = true) {
+  if (timer_field && minutes == TIMER_TIME_SPECIAL) {
+    ESP_LOGD(TAG, "  %s: special timer value 0x600 (not a time; see RKR ON1 observations)", LOG_STR_ARG(name));
   } else if (minutes < 24 * 60) {
     ESP_LOGD(TAG, "  %s: %02u:%02u (raw=%u min)", LOG_STR_ARG(name), minutes / 60, minutes % 60, minutes);
   } else {
@@ -91,21 +91,31 @@ void PanasonicIrClimate::log_command_(const Command &command, CommandStatus stat
   ESP_LOGD(
       TAG, "  Horizontal=%u (%s; 6=middle, 9..12=fixed, 13=auto)", b[17] & 15,
       supports_horizontal_vane(this->model_) ? LOG_STR_LITERAL("supported model") : LOG_STR_LITERAL("model-specific"));
-  ESP_LOGD(TAG, "  Timer enable bits: ON=%u OFF=%u; candidate update flags: B19.3=%u B20.7=%u (DKE research)",
-           (b[13] >> 1) & 1, (b[13] >> 2) & 1, (b[19] >> 3) & 1, b[20] >> 7);
+  ESP_LOGD(TAG, "  Timer enable bits: ON=%u OFF=%u; unknown timer-adjacent flags: B19.3=%u B20.7=%u", (b[13] >> 1) & 1,
+           (b[13] >> 2) & 1, (b[19] >> 3) & 1, b[20] >> 7);
   log_time(LOG_STR("ON timer"), b[18] | ((b[19] & 7) << 8));
   log_time(LOG_STR("OFF timer"), (b[19] >> 4) | ((b[20] & 0x7F) << 4));
-  log_time(LOG_STR("Clock field (model/context dependent)"), b[24] | ((b[25] & 7) << 8));
-  ESP_LOGD(TAG, "  B13.3=%u (RKR timer-policy observation); B25.6=%u B25.7=%u (slot/feature meaning unresolved)",
+  if (this->model_ == Model::RKR && has_rkr_ordinary_timer_fields(command)) {
+    ESP_LOGD(TAG, "  Clock raw=0x000 (00:00); ordinary-command pattern: current remote clock not supplied");
+    ESP_LOGD(TAG, "  RKR ON1 observation: with B13.3=1 and special time, ON enable retained an existing timer;");
+    ESP_LOGD(TAG, "    clearing ON enable cancelled it; setting it did not activate an unprogrammed timer");
+  } else {
+    log_time(LOG_STR("Raw clock field (candidate current time; context-dependent)"), b[24] | ((b[25] & 7) << 8), false);
+  }
+  ESP_LOGD(TAG, "  B13.3=%u (RKR timer-policy observation); B25.6=%u B25.7=%u (ON/OFF slot 2 in timer context)",
            (b[13] >> 3) & 1, (b[25] >> 6) & 1, b[25] >> 7);
   if (this->model_ == Model::RKR) {
+    if (b[23] == 0x80 && (b[13] & 8)) {
+      ESP_LOGD(TAG, "  Timer slots: ON=%u OFF=%u", (b[25] & 0x40) ? 2 : 1, (b[25] & 0x80) ? 2 : 1);
+      ESP_LOGD(TAG, "  RKR timer-command context: B23=80, B13.3=1 (observed SET/CANCEL; B23 bit meanings unknown)");
+    }
     ESP_LOGD(TAG, "  MILD DRY observation: %s (B15=%02X)",
              mode == static_cast<uint8_t>(Mode::COOL) && b[15] == 0x7F   ? LOG_STR_LITERAL("ON encoding")
              : mode == static_cast<uint8_t>(Mode::COOL) && b[15] == 0x80 ? LOG_STR_LITERAL("OFF encoding")
                                                                          : LOG_STR_LITERAL("unknown in this context"),
              b[15]);
     ESP_LOGD(TAG, "  iAUTO-X candidate=%u (AUTO and B25.7, observed only; not a universal timer-slot flag)",
-             mode == static_cast<uint8_t>(Mode::AUTO) && (b[25] & 0x80));
+             b[23] == 0x89 && mode == static_cast<uint8_t>(Mode::AUTO) && (b[25] & 0x80));
   }
   ESP_LOGD(TAG, "  Model/unknown fields: B12=%02X B13=%02X B14=%02X B15=%02X B17=%02X", b[12], b[13], b[14], b[15],
            b[17]);

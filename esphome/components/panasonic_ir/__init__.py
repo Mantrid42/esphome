@@ -14,7 +14,7 @@ CONF_TIMERS_ID = "timers_id"
 CONF_TIMER = "timer"
 RkrTimers = panasonic_ir_ns.class_("RkrTimers", cg.Component)
 TimerSlot = panasonic_ir_ns.enum("TimerSlot", is_class=True)
-TIMER_SLOTS = TimerSlot.options("ON2", "OFF2", prefix="TIMER_SLOT_")
+TIMER_SLOTS = TimerSlot.options("ON1", "ON2", "OFF1", "OFF2", prefix="TIMER_SLOT_")
 
 CONFIG_SCHEMA = cv.Schema(
     {
