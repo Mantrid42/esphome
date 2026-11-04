@@ -14,9 +14,9 @@ CONF_VANE_POSITION = "vane_position"
 CONF_HORIZONTAL_VANE_POSITION = "horizontal_vane_position"
 
 # Option 0 is auto, the others are the fixed positions of the vertical vane from the highest to the lowest
-VANE_POSITIONS = ["Auto", "1", "2", "3", "4", "5"]
+VANE_POSITIONS = ["Swing", "Up", "High", "Middle", "Low", "Down"]
 HORIZONTAL_VANE_POSITIONS = [
-    "Auto",
+    "Swing",
     "Left",
     "Middle Left",
     "Middle",
