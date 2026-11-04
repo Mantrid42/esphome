@@ -81,3 +81,47 @@ climate:
     model: RKR
     transmitter_id: xmitr
     receiver_id: rcvr
+
+api:
+  actions:
+    - action: ac_panasonic_set
+      variables:
+        power: {type: string, required: false}
+        hvac_mode: {type: string, required: false}
+        temperature: {type: int, default: -1}
+        fan_mode: {type: string, required: false}
+        vertical_vane: {type: string, required: false}
+        horizontal_vane: {type: string, required: false}
+        swing_mode: {type: string, required: false}
+        preset: {type: string, required: false}
+        mild_dry: {type: string, required: false}
+        iauto_x: {type: string, required: false}
+      then:
+        - if:
+            condition:
+              lambda: return id(panasonic_rkr_climate).api_set(power, hvac_mode, temperature, fan_mode, vertical_vane, horizontal_vane, swing_mode, preset, mild_dry, iauto_x);
+            then:
+              - api.respond:
+                  success: true
+            else:
+              - api.respond:
+                  success: false
+                  error_message: "Invalid or incompatible Panasonic request, or clock unavailable"
+    - action: ac_panasonic_timer_set
+      variables:
+        timer: string
+        slot: int
+        local_time: {type: string, required: false}
+        minutes_from_now: {type: int, default: -1}
+        timer_mode: {type: string, required: false}
+      then:
+        - if:
+            condition:
+              lambda: return id(ha_timers).api_set(timer, slot, local_time, minutes_from_now, timer_mode);
+            then:
+              - api.respond:
+                  success: true
+            else:
+              - api.respond:
+                  success: false
+                  error_message: "Invalid or incompatible Panasonic request, or clock unavailable"

@@ -1718,6 +1718,72 @@ TEST(PanasonicTimers, RefusesOtherModelsAndNonIndependentOperations) {
   EXPECT_EQ(f.transmitter.frames.size(), 2);
 }
 
+TEST(PanasonicTimers, AtomicOperatingApiPublishesOneTimerNeutralFrame) {
+  Fixture f(Model::RKR);
+  ASSERT_TRUE(f.climate.api_set(StringRef("ON"), StringRef("COOL"), 20, StringRef("MEDIUM"), StringRef("2"),
+                                StringRef("Right"), {}, {}, {}, {}));
+  ASSERT_EQ(f.transmitter.frames.size(), 1);
+  auto bytes = f.last_state();
+  EXPECT_EQ(bytes[13], 0x31);
+  EXPECT_EQ(bytes[14], 40);
+  EXPECT_EQ(bytes[16], 0x52);
+  EXPECT_EQ(bytes[17], VANE_H_FULL_RIGHT);
+  EXPECT_EQ(bytes[23], 0x89);
+  EXPECT_EQ(bytes[26], calc_checksum(bytes.data(), STATE_LENGTH));
+  EXPECT_EQ(f.climate.mode, climate::CLIMATE_MODE_COOL);
+  EXPECT_EQ(f.climate.target_temperature, 20);
+  EXPECT_FALSE(f.climate.api_set({}, StringRef("HEAT"), 22, StringRef("AUTO"), {}, {}, {}, {}, StringRef("ON"), {}));
+  EXPECT_EQ(f.transmitter.frames.size(), 1);
+  ASSERT_TRUE(f.climate.api_set({}, {}, -1, {}, {}, {}, {}, {}, {}, {}));
+  EXPECT_EQ(f.last_state(), bytes);
+  ASSERT_TRUE(f.climate.api_set(StringRef("OFF"), {}, -1, {}, {}, {}, {}, {}, {}, {}));
+  EXPECT_EQ(f.last_state()[13], 0x30);
+  EXPECT_EQ(f.climate.mode, climate::CLIMATE_MODE_OFF);
+  ASSERT_TRUE(f.climate.api_set(StringRef("ON"), {}, -1, {}, {}, {}, {}, {}, {}, {}));
+  EXPECT_EQ(f.last_state(), bytes);
+  EXPECT_EQ(f.transmitter.frames.size(), 4);
+  ASSERT_TRUE(f.climate.api_set(StringRef("OFF"), {}, -1, {}, {}, {}, {}, {}, {}, {}));
+  ASSERT_TRUE(f.climate.api_set({}, StringRef("HEAT"), 22, StringRef("AUTO"), {}, {}, {}, {}, {}, {}));
+  EXPECT_EQ(f.last_state()[13], 0x40);
+  ASSERT_TRUE(f.climate.api_set(StringRef("ON"), {}, -1, {}, {}, {}, {}, {}, {}, {}));
+  EXPECT_EQ(f.last_state()[13], 0x41);
+}
+TEST(PanasonicTimers, AtomicTimerApiValidatesThenCommitsOnlyOneSlot) {
+  Fixture f(Model::RKR);
+  TimerClock clock;
+  RkrTimers timers(&f.climate, &clock);
+  timers.setup();
+  for (unsigned i = 0; i < 4; i++) {
+    auto slot = static_cast<TimerSlot>(i);
+    StringRef type(i < 2 ? "ON" : "OFF");
+    int n = i % 2 + 1;
+    clock.epoch = 0;
+    EXPECT_FALSE(timers.api_set(type, n, StringRef("00:00"), -1, StringRef("once")));
+    clock.epoch = 1767598198;
+    for (auto bad : {"24:00", "6:30", "06:60", "06:31", "06-30"})
+      EXPECT_FALSE(timers.api_set(type, n, StringRef(bad), -1, StringRef("once")));
+    EXPECT_FALSE(timers.api_set(type, n, StringRef("06:30"), 30, StringRef("once")));
+    auto count = f.transmitter.frames.size();
+    ASSERT_TRUE(timers.api_set(type, n, StringRef("00:00"), -1, StringRef("once")));
+    EXPECT_EQ(f.transmitter.frames.size(), count + 1);
+    EXPECT_EQ(timers.get_mode(slot), 2);
+    EXPECT_EQ(timers.get_minutes(slot), 0);
+    auto frame = f.last_state();
+    auto fields = decode_rkr_timers(frame.data());
+    EXPECT_EQ(frame[26], calc_checksum(frame.data(), STATE_LENGTH));
+    EXPECT_EQ(frame[23], 0x80);
+    EXPECT_EQ(fields.on_slot2, i == 1);
+    EXPECT_EQ(fields.off_slot2, i == 3);
+    EXPECT_EQ(i < 2 ? fields.off_minutes : fields.on_minutes, TIMER_TIME_SPECIAL);
+    ASSERT_TRUE(timers.api_set(type, n, {}, -1, StringRef("daily")));
+    clock.epoch += 90000;
+    timers.cleanup_();
+    EXPECT_EQ(f.transmitter.frames.size(), count + 2);
+    ASSERT_TRUE(timers.api_set(type, n, {}, -1, StringRef("disabled")));
+    EXPECT_EQ(timers.get_minutes(slot), 0);
+    EXPECT_EQ(f.transmitter.frames.size(), count + 3);
+  }
+}
 TEST(PanasonicTimers, UsesLocalClockIncludingSydneyDaylightSaving) {
   const auto previous = time::get_global_tz();
   time::ParsedTimezone sydney{};
@@ -1778,6 +1844,18 @@ TEST(PanasonicTimers, UsesLocalClockIncludingSydneyDaylightSaving) {
   clock.epoch++;
   timers.cleanup_();
   EXPECT_EQ(timers.get_mode(TimerSlot::TIMER_SLOT_ON2), 0);
+  clock.epoch = 1791043020;
+  ASSERT_TRUE(timers.api_set(StringRef("OFF"), 1, {}, 10, StringRef("once")));
+  EXPECT_EQ(decode_rkr_timers(f.last_state().data()).off_minutes, 190);
+  clock.epoch = 1775318220;
+  ASSERT_TRUE(timers.api_set(StringRef("OFF"), 1, {}, 10, StringRef("once")));
+  EXPECT_EQ(decode_rkr_timers(f.last_state().data()).off_minutes, 130);
+  clock.epoch = 1793797020;
+  ASSERT_TRUE(timers.api_set(StringRef("OFF"), 1, {}, 10, StringRef("once")));
+  EXPECT_EQ(decode_rkr_timers(f.last_state().data()).off_minutes, 10);
+  clock.epoch = 1793762820;
+  ASSERT_TRUE(timers.api_set(StringRef("OFF"), 1, {}, 60, StringRef("once")));
+  EXPECT_EQ(decode_rkr_timers(f.last_state().data()).off_minutes, 930);
   time::set_global_tz(previous);
 }
 

@@ -175,6 +175,71 @@ bool RkrTimers::apply(TimerSlot slot) {
   return true;
 }
 
+bool RkrTimers::api_set(StringRef timer, int slot, StringRef time, int delay, StringRef mode) {
+  ESP_LOGI(TAG, "API timer=%.*s slot=%d time=%.*s minutes_from_now=%d mode=%.*s", int(timer.size()), timer.c_str(),
+           slot, int(time.size()), time.empty() ? "" : time.c_str(), delay, int(mode.size()),
+           mode.empty() ? "" : mode.c_str());
+  if ((timer != "ON" && timer != "OFF") || (slot != 1 && slot != 2) || delay < -1 || delay > 1440 ||
+      (!time.empty() && delay != -1))
+    return false;
+  auto now = this->clock_->now();
+  if (!now.is_valid())
+    return false;
+  unsigned i = (timer == "ON" ? 0 : 2) + slot - 1;
+  unsigned minutes = this->settings_.minutes[i];
+  unsigned requested = this->settings_.enabled[i];
+  if (!mode.empty()) {
+    if (mode == "disabled")
+      requested = 0;
+    else if (mode == "daily")
+      requested = 1;
+    else if (mode == "once")
+      requested = 2;
+    else
+      return false;
+  }
+  if (!time.empty()) {
+    if (time.size() != 5 || time[2] != ':')
+      return false;
+    for (unsigned j : {0U, 1U, 3U, 4U})
+      if (time[j] < '0' || time[j] > '9')
+        return false;
+    unsigned mm = (time[3] - '0') * 10 + time[4] - '0';
+    minutes = ((time[0] - '0') * 10 + time[1] - '0') * 60 + mm;
+    if (mm >= 60 || !valid_timer_minutes(minutes))
+      return false;
+  } else if (delay != -1) {
+    // Walk elapsed minutes, converting at each boundary so gaps and folds follow the local timezone.
+    auto start = now.timestamp - now.second;
+    unsigned first = delay + (now.second != 0);
+    ESPTime target{};
+    for (unsigned n = std::max(1U, first); n <= first + 10; n++) {
+      target = ESPTime::from_epoch_local(start + n * 60);
+      if (target.minute % 10 == 0)
+        break;
+    }
+    minutes = target.hour * 60 + target.minute;
+    // A daily hardware timer cannot skip an earlier occurrence of the same wall time.
+    for (auto epoch = start + 60; epoch < target.timestamp; epoch += 60) {
+      auto local = ESPTime::from_epoch_local(epoch);
+      if (local.hour * 60 + local.minute == minutes)
+        return false;
+    }
+    ESP_LOGI(TAG, "Requested delay %d min resolves to local %02u:%02u", delay, target.hour, target.minute);
+  }
+  RkrTimerFields fields;
+  if (!make_rkr_timer_operation(static_cast<TimerSlot>(i), minutes, requested != 0, now.hour * 60 + now.minute,
+                                fields) ||
+      !this->climate_->send_timer_state(fields))
+    return false;
+  this->pending_slots_ = 0;
+  this->settings_.minutes[i] = minutes;
+  this->settings_.enabled[i] = requested;
+  this->committed_(i, now);
+  this->refresh_(i);
+  return true;
+}
+
 bool RkrTimers::apply_all() {
   if (!this->clock_->now().is_valid()) {
     this->pending_slots_ = 0;

@@ -17,7 +17,7 @@ select:
 
 api:
   actions:
-    - action: send_panasonic_ac_command
+    - action: ac_panasonic_send_command
       variables:
         data: string
       then:

@@ -112,7 +112,7 @@ The native transmitter accepts an API string through this device-local action:
 ```yaml
 api:
   actions:
-    - action: send_panasonic_ac_command
+    - action: ac_panasonic_send_command
       variables:
         data: string
       then:
@@ -410,3 +410,53 @@ Hardware priorities: test each combined pair with distinct times and verify actu
 run Once across an edit, reboot, due event and cleanup; verify repeated ECONAVI requests, cycle
 buttons and COOL/iAUTO-X return including vanes. Check feature preservation during timer writes,
 especially iAUTO-X with OFF1 selected, and compare actual DST execution with local scheduling.
+
+## Atomic Home Assistant actions (IR3 development configuration)
+
+Replace references to the old raw action in existing automations with
+`esphome.russell_office_ir_ac_panasonic_send_command`. Its required string `data` is unchanged.
+The Pronto action is unchanged. The other two actions return API success/failure status;
+success means accepted for local transmission, not an indoor-unit acknowledgement.
+
+`ac_panasonic_set` accepts optional strings (case-sensitive): power, mild_dry and iauto_x
+take ON/OFF; hvac_mode takes OFF, AUTO/HEAT_COOL, COOL, HEAT, DRY or FAN_ONLY; fan_mode takes
+AUTO, MINIMUM, LOW, MEDIUM, HIGH or MAXIMUM. vertical_vane takes Auto or strings 1–5;
+horizontal_vane takes Auto, Left, Middle Left, Middle, Middle Right or Right. swing_mode
+takes OFF or VERTICAL; preset takes NONE, AWAY or FROST_PROTECTION. temperature is an integer
+16–30 °C. A non-OFF HVAC mode updates the remembered mode without changing power unless power is supplied. MILD DRY ON requires powered COOL. iAUTO-X ON selects
+powered AUTO/25 °C; OFF restores the previous state unless explicitly overridden.
+Frost protection selects HEAT, maximum fan and vertical swing; incompatible explicit settings
+are rejected. Changing away from active frost protection can be combined with preset NONE.
+The existing encoder still sends 27 °C in fan-only mode. No short feature commands are sent.
+The device's native vane selects publish received and API changes without transmitting again.
+
+`ac_panasonic_timer_set` requires timer (string ON/OFF) and slot (integer 1/2). Optional:
+local_time (string HH:MM at ten-minute resolution), minutes_from_now (integer), timer_mode
+(disabled/daily/once). ESPHome rejects the literal API variable name **time**, hence local_time.
+Omit both time fields to use the editable time, and omit timer_mode to retain the selected mode.
+Absolute and relative time are mutually exclusive. Relative delays 0–1440 use elapsed time
+and round up to a future local ten-minute boundary. If that same wall time would occur sooner,
+the request is rejected: the Panasonic has no date field to skip the intervening occurrence.
+The device must have a valid local clock even for cancellation. Exactly one selective frame
+is submitted before publishing or persisting changes. Once uses the existing cleanup mechanism.
+
+ESPHome 2026.11.0-dev advertises optional variables to compatible HA clients. Empty strings and
+integer -1 are reserved for omission; OFF, zero delay and midnight are real requests. Older
+clients that do not honour optional-argument metadata may require these sentinels explicitly.
+
+Example Home Assistant action calls (each list entry is an independent example):
+
+```yaml
+- action: esphome.russell_office_ir_ac_panasonic_set
+  data: {power: "ON", hvac_mode: COOL, temperature: 20, fan_mode: MEDIUM}
+- action: esphome.russell_office_ir_ac_panasonic_set
+  data: {power: "ON", hvac_mode: HEAT, temperature: 22, fan_mode: AUTO}
+- action: esphome.russell_office_ir_ac_panasonic_timer_set
+  data: {timer: "OFF", slot: 1, minutes_from_now: 60, timer_mode: once}
+- action: esphome.russell_office_ir_ac_panasonic_timer_set
+  data: {timer: "ON", slot: 2, local_time: "06:30", timer_mode: daily}
+- action: esphome.russell_office_ir_ac_panasonic_timer_set
+  data: {timer: "OFF", slot: 1, timer_mode: disabled}
+- action: esphome.russell_office_ir_ac_panasonic_set
+  data: {}
+```

@@ -205,6 +205,136 @@ void PanasonicIrClimate::build_state_(uint8_t *state) {
 }
 
 #ifdef USE_PANASONIC_RKR_TIMERS
+bool PanasonicIrClimate::api_set(StringRef power, StringRef hvac, int temperature, StringRef fan, StringRef vertical,
+                                 StringRef horizontal, StringRef swing, StringRef preset, StringRef mild,
+                                 StringRef iauto) {
+  if (this->model_ != Model::RKR)
+    return false;
+  auto token = [](StringRef value, std::initializer_list<const char *> choices) {
+    if (value.empty())
+      return -1;
+    int index = 0;
+    for (auto choice : choices) {
+      if (value == choice)
+        return index;
+      index++;
+    }
+    return -2;
+  };
+  int p = token(power, {"OFF", "ON"}), m = token(hvac, {"AUTO", "DRY", "COOL", "HEAT", "FAN_ONLY", "OFF", "HEAT_COOL"}),
+      f = token(fan, {"AUTO", "MINIMUM", "LOW", "MEDIUM", "HIGH", "MAXIMUM"}),
+      v = token(vertical, {"Auto", "1", "2", "3", "4", "5"}),
+      h = token(horizontal, {"Auto", "Left", "Middle Left", "Middle", "Middle Right", "Right"}),
+      sw = token(swing, {"OFF", "VERTICAL"}), pr = token(preset, {"NONE", "AWAY", "FROST_PROTECTION"}),
+      md = token(mild, {"OFF", "ON"}), ix = token(iauto, {"OFF", "ON"});
+  ESP_LOGI(TAG,
+           "API request power=%d mode=%d temp=%d fan=%d vertical=%d horizontal=%d swing=%d preset=%d mild=%d iauto=%d "
+           "(-1 omitted)",
+           p, m, temperature, f, v, h, sw, pr, md, ix);
+  if (std::min({p, m, f, v, h, sw, pr, md, ix}) < -1 ||
+      (temperature != -1 && (temperature < TEMP_MIN || temperature > TEMP_MAX)) || (m == 5 && p == 1) ||
+      (v >= 0 && sw >= 0 && (v == 0) != (sw == 1)))
+    return false;
+  const climate::ClimateMode modes[] = {climate::CLIMATE_MODE_HEAT_COOL, climate::CLIMATE_MODE_DRY,
+                                        climate::CLIMATE_MODE_COOL, climate::CLIMATE_MODE_HEAT,
+                                        climate::CLIMATE_MODE_FAN_ONLY};
+  Mode wire = this->last_mode_;
+  auto resolved = this->mode;
+  if (resolved == climate::CLIMATE_MODE_OFF) {
+    switch (wire) {
+      case Mode::DRY:
+        resolved = modes[1];
+        break;
+      case Mode::COOL:
+        resolved = modes[2];
+        break;
+      case Mode::HEAT:
+        resolved = modes[3];
+        break;
+      case Mode::FAN:
+        resolved = modes[4];
+        break;
+      default:
+        resolved = modes[0];
+    }
+  }
+  bool on = this->mode != climate::CLIMATE_MODE_OFF;
+  float temp = this->target_temperature;
+  if (ix == 0 && this->iauto_) {
+    resolved = this->return_mode_;
+    temp = this->return_temperature_;
+  }
+  if (m >= 0 && m != 5)
+    resolved = modes[m == 6 ? 0 : m];
+  if (m == 5)
+    on = false;
+  bool frost = pr < 0 ? this->preset.value_or(climate::CLIMATE_PRESET_NONE) == climate::CLIMATE_PRESET_AWAY : pr != 0;
+  if (pr > 0) {
+    if ((m >= 0 && m != 3) || p == 0)
+      return false;
+    resolved = modes[3];
+    on = true;
+  }
+  if (p >= 0)
+    on = p;
+  bool active = ix >= 0 ? ix == 1 : this->iauto_ && resolved == modes[0] && on;
+  if (ix == 1) {
+    if (p == 0 || (m >= 0 && m != 0 && m != 6))
+      return false;
+    resolved = modes[0];
+    on = true;
+    temp = 25;
+  }
+  if (temperature != -1)
+    temp = temperature;
+  if ((active && (temp != 25 || frost)) || (md == 1 && (!on || resolved != modes[2])) ||
+      (frost && on && (resolved != modes[3] || temperature != -1 || (f >= 0 && f != 5) || sw == 0 || v > 0)))
+    return false;
+  if (active && !this->iauto_) {
+    this->return_mode_ = this->mode == climate::CLIMATE_MODE_OFF ? modes[0] : this->mode;
+    this->return_temperature_ = this->target_temperature;
+  }
+  this->iauto_ = active;
+  if (md >= 0)
+    this->mild_dry_ = md == 1;
+  this->mode = on ? resolved : climate::CLIMATE_MODE_OFF;
+  this->last_mode_ = resolved == modes[1]   ? Mode::DRY
+                     : resolved == modes[2] ? Mode::COOL
+                     : resolved == modes[3] ? Mode::HEAT
+                     : resolved == modes[4] ? Mode::FAN
+                                            : Mode::AUTO;
+  this->target_temperature = temp;
+  this->preset = frost ? climate::CLIMATE_PRESET_AWAY : climate::CLIMATE_PRESET_NONE;
+  if (f == 1 || f == 5)
+    this->set_custom_fan_mode_(f == 1 ? FAN_MODE_MINIMUM : FAN_MODE_MAXIMUM);
+  else if (f >= 0)
+    this->set_fan_mode_(f == 2   ? climate::CLIMATE_FAN_LOW
+                        : f == 3 ? climate::CLIMATE_FAN_MEDIUM
+                        : f == 4 ? climate::CLIMATE_FAN_HIGH
+                                 : climate::CLIMATE_FAN_AUTO);
+  if (v > 0)
+    this->vane_position_ = v;
+  if (v >= 0 || sw >= 0)
+    this->swing_mode = (v == 0 || sw == 1) ? climate::CLIMATE_SWING_VERTICAL : climate::CLIMATE_SWING_OFF;
+  if (h >= 0)
+    this->horizontal_vane_position_ = progmem_read_byte(&HORIZONTAL_VANE_POSITIONS[h]);
+  uint8_t state[STATE_LENGTH];
+  this->build_state_(state);
+  char hex[format_hex_pretty_size(STATE_LENGTH)];
+  ESP_LOGI(TAG,
+           "API resolved power=%u mode=%u target=%.0f fan=%u vertical=%u horizontal=%u frost=%u mild=%u iauto=%u "
+           "checksum=%02X frame=%s",
+           on, (unsigned) this->last_mode_, this->target_temperature, this->fan_speed_(), this->vane_v_(),
+           this->horizontal_vane_position_, frost, this->mild_dry_, active, state[26],
+           format_hex_pretty_to(hex, state, STATE_LENGTH, ' '));
+  this->send_state_(state);
+  this->sync_vane_select_();
+  this->sync_horizontal_vane_select_();
+  this->publish_state();
+  if (md == 1 && this->timer_controller)
+    this->timer_controller->observe_features(false);
+  return true;
+}
 void PanasonicIrClimate::send_short(uint8_t a, uint8_t b) {
   if (this->model_ != Model::RKR)
     return;

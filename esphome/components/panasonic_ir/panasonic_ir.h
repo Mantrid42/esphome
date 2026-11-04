@@ -40,6 +40,9 @@ class PanasonicIrClimate final : public climate_ir::ClimateIR {
   bool send_command_hex(const std::string &hex);
 #ifdef USE_PANASONIC_RKR_TIMERS
   RkrTimers *timer_controller{};
+  bool api_set(StringRef power, StringRef hvac_mode, int temperature, StringRef fan_mode, StringRef vertical_vane,
+               StringRef horizontal_vane, StringRef swing_mode, StringRef preset, StringRef mild_dry,
+               StringRef iauto_x);
   void send_short(uint8_t a, uint8_t b);
   void toggle_iauto();
   bool send_timer_state(const RkrTimerFields &timers);
