@@ -1755,16 +1755,15 @@ TEST(PanasonicTimers, AtomicTimerApiValidatesThenCommitsOnlyOneSlot) {
   timers.setup();
   for (unsigned i = 0; i < 4; i++) {
     auto slot = static_cast<TimerSlot>(i);
-    StringRef type(i < 2 ? "ON" : "OFF");
-    int n = i % 2 + 1;
+    StringRef type(i == 0 ? "ON1" : i == 1 ? "ON2" : i == 2 ? "OFF1" : "OFF2");
     clock.epoch = 0;
-    EXPECT_FALSE(timers.api_set(type, n, StringRef("00:00"), -1, StringRef("once")));
+    EXPECT_FALSE(timers.api_set(type, StringRef("00:00"), -1, StringRef("once")));
     clock.epoch = 1767598198;
     for (auto bad : {"24:00", "6:30", "06:60", "06:31", "06-30"})
-      EXPECT_FALSE(timers.api_set(type, n, StringRef(bad), -1, StringRef("once")));
-    EXPECT_FALSE(timers.api_set(type, n, StringRef("06:30"), 30, StringRef("once")));
+      EXPECT_FALSE(timers.api_set(type, StringRef(bad), -1, StringRef("once")));
+    EXPECT_FALSE(timers.api_set(type, StringRef("06:30"), 30, StringRef("once")));
     auto count = f.transmitter.frames.size();
-    ASSERT_TRUE(timers.api_set(type, n, StringRef("00:00"), -1, StringRef("once")));
+    ASSERT_TRUE(timers.api_set(type, StringRef("00:00"), -1, StringRef("once")));
     EXPECT_EQ(f.transmitter.frames.size(), count + 1);
     EXPECT_EQ(timers.get_mode(slot), 2);
     EXPECT_EQ(timers.get_minutes(slot), 0);
@@ -1775,11 +1774,11 @@ TEST(PanasonicTimers, AtomicTimerApiValidatesThenCommitsOnlyOneSlot) {
     EXPECT_EQ(fields.on_slot2, i == 1);
     EXPECT_EQ(fields.off_slot2, i == 3);
     EXPECT_EQ(i < 2 ? fields.off_minutes : fields.on_minutes, TIMER_TIME_SPECIAL);
-    ASSERT_TRUE(timers.api_set(type, n, {}, -1, StringRef("daily")));
+    ASSERT_TRUE(timers.api_set(type, {}, -1, StringRef("daily")));
     clock.epoch += 90000;
     timers.cleanup_();
     EXPECT_EQ(f.transmitter.frames.size(), count + 2);
-    ASSERT_TRUE(timers.api_set(type, n, {}, -1, StringRef("disabled")));
+    ASSERT_TRUE(timers.api_set(type, {}, -1, StringRef("disabled")));
     EXPECT_EQ(timers.get_minutes(slot), 0);
     EXPECT_EQ(f.transmitter.frames.size(), count + 3);
   }
@@ -1845,16 +1844,16 @@ TEST(PanasonicTimers, UsesLocalClockIncludingSydneyDaylightSaving) {
   timers.cleanup_();
   EXPECT_EQ(timers.get_mode(TimerSlot::TIMER_SLOT_ON2), 0);
   clock.epoch = 1791043020;
-  ASSERT_TRUE(timers.api_set(StringRef("OFF"), 1, {}, 10, StringRef("once")));
+  ASSERT_TRUE(timers.api_set(StringRef("OFF1"), StringRef("unchanged"), 10, StringRef("once")));
   EXPECT_EQ(decode_rkr_timers(f.last_state().data()).off_minutes, 190);
   clock.epoch = 1775318220;
-  ASSERT_TRUE(timers.api_set(StringRef("OFF"), 1, {}, 10, StringRef("once")));
+  ASSERT_TRUE(timers.api_set(StringRef("OFF1"), StringRef("unchanged"), 10, StringRef("once")));
   EXPECT_EQ(decode_rkr_timers(f.last_state().data()).off_minutes, 130);
   clock.epoch = 1793797020;
-  ASSERT_TRUE(timers.api_set(StringRef("OFF"), 1, {}, 10, StringRef("once")));
+  ASSERT_TRUE(timers.api_set(StringRef("OFF1"), StringRef("unchanged"), 10, StringRef("once")));
   EXPECT_EQ(decode_rkr_timers(f.last_state().data()).off_minutes, 10);
   clock.epoch = 1793762820;
-  ASSERT_TRUE(timers.api_set(StringRef("OFF"), 1, {}, 60, StringRef("once")));
+  ASSERT_TRUE(timers.api_set(StringRef("OFF1"), StringRef("unchanged"), 60, StringRef("once")));
   EXPECT_EQ(decode_rkr_timers(f.last_state().data()).off_minutes, 930);
   time::set_global_tz(previous);
 }

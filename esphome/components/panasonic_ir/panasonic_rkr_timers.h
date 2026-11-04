@@ -30,7 +30,7 @@ class RkrTimers : public Component {
   void set_enabled(TimerSlot slot, bool enabled);
   bool apply(TimerSlot slot);
   bool apply_all();
-  bool api_set(StringRef timer, int slot, StringRef time, int minutes_from_now, StringRef timer_mode);
+  bool api_set(StringRef timer, StringRef time, int minutes_from_now, StringRef timer_mode);
   void set_mode(TimerSlot slot, size_t mode);
   uint8_t get_mode(TimerSlot slot) const { return this->settings_.enabled[static_cast<unsigned>(slot)]; }
   void set_accept_received_timers(bool accept) { this->accept_ = accept; }

@@ -430,7 +430,7 @@ are rejected. Changing away from active frost protection can be combined with pr
 The existing encoder still sends 27 °C in fan-only mode. No short feature commands are sent.
 The device's native vane selects publish received and API changes without transmitting again.
 
-`ac_panasonic_timer_set` requires timer (string ON/OFF) and slot (integer 1/2). Optional:
+`ac_panasonic_timer_set` requires one timer string (ON1, ON2, OFF1 or OFF2). Optional:
 local_time (string HH:MM at ten-minute resolution), minutes_from_now (integer), timer_mode
 (disabled/daily/once). ESPHome rejects the literal API variable name **time**, hence local_time.
 Omit both time fields to use the editable time, and omit timer_mode to retain the selected mode.
@@ -441,7 +441,9 @@ The device must have a valid local clock even for cancellation. Exactly one sele
 is submitted before publishing or persisting changes. Once uses the existing cleanup mechanism.
 
 ESPHome 2026.11.0-dev advertises optional variables to compatible HA clients. Empty strings and
-integer -1 are reserved for omission; OFF, zero delay and midnight are real requests. Older
+integer -1 are reserved for omission; OFF, zero delay and midnight are real requests. For the timer action, local_time and timer_mode explicitly advertise the nonempty default
+`unchanged`. On clients that require all fields, pass local_time: unchanged for relative delays,
+minutes_from_now: -1 for absolute times, and timer_mode: unchanged to retain the mode. Older
 clients that do not honour optional-argument metadata may require these sentinels explicitly.
 
 Example Home Assistant action calls (each list entry is an independent example):
@@ -452,11 +454,11 @@ Example Home Assistant action calls (each list entry is an independent example):
 - action: esphome.russell_office_ir_ac_panasonic_set
   data: {power: "ON", hvac_mode: HEAT, temperature: 22, fan_mode: AUTO}
 - action: esphome.russell_office_ir_ac_panasonic_timer_set
-  data: {timer: "OFF", slot: 1, minutes_from_now: 60, timer_mode: once}
+  data: {timer: OFF1, minutes_from_now: 60, timer_mode: once}
 - action: esphome.russell_office_ir_ac_panasonic_timer_set
-  data: {timer: "ON", slot: 2, local_time: "06:30", timer_mode: daily}
+  data: {timer: ON2, local_time: "06:30", timer_mode: daily}
 - action: esphome.russell_office_ir_ac_panasonic_timer_set
-  data: {timer: "OFF", slot: 1, timer_mode: disabled}
+  data: {timer: OFF1, timer_mode: disabled}
 - action: esphome.russell_office_ir_ac_panasonic_set
   data: {}
 ```

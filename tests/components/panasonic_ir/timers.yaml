@@ -110,14 +110,13 @@ api:
     - action: ac_panasonic_timer_set
       variables:
         timer: string
-        slot: int
-        local_time: {type: string, required: false}
+        local_time: {type: string, default: unchanged}
         minutes_from_now: {type: int, default: -1}
-        timer_mode: {type: string, required: false}
+        timer_mode: {type: string, default: unchanged}
       then:
         - if:
             condition:
-              lambda: return id(ha_timers).api_set(timer, slot, local_time, minutes_from_now, timer_mode);
+              lambda: return id(ha_timers).api_set(timer, local_time, minutes_from_now, timer_mode);
             then:
               - api.respond:
                   success: true

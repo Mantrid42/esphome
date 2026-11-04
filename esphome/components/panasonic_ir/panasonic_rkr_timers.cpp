@@ -175,17 +175,20 @@ bool RkrTimers::apply(TimerSlot slot) {
   return true;
 }
 
-bool RkrTimers::api_set(StringRef timer, int slot, StringRef time, int delay, StringRef mode) {
-  ESP_LOGI(TAG, "API timer=%.*s slot=%d time=%.*s minutes_from_now=%d mode=%.*s", int(timer.size()), timer.c_str(),
-           slot, int(time.size()), time.empty() ? "" : time.c_str(), delay, int(mode.size()),
+bool RkrTimers::api_set(StringRef timer, StringRef time, int delay, StringRef mode) {
+  if (time == "unchanged")
+    time = {};
+  if (mode == "unchanged")
+    mode = {};
+  const unsigned i = timer == "ON1" ? 0 : timer == "ON2" ? 1 : timer == "OFF1" ? 2 : timer == "OFF2" ? 3 : 4;
+  ESP_LOGI(TAG, "API timer=%.*s time=%.*s minutes_from_now=%d mode=%.*s", int(timer.size()), timer.c_str(),
+           int(time.size()), time.empty() ? "" : time.c_str(), delay, int(mode.size()),
            mode.empty() ? "" : mode.c_str());
-  if ((timer != "ON" && timer != "OFF") || (slot != 1 && slot != 2) || delay < -1 || delay > 1440 ||
-      (!time.empty() && delay != -1))
+  if (i == 4 || delay < -1 || delay > 1440 || (!time.empty() && delay != -1))
     return false;
   auto now = this->clock_->now();
   if (!now.is_valid())
     return false;
-  unsigned i = (timer == "ON" ? 0 : 2) + slot - 1;
   unsigned minutes = this->settings_.minutes[i];
   unsigned requested = this->settings_.enabled[i];
   if (!mode.empty()) {
