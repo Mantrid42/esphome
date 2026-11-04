@@ -4,7 +4,8 @@ import esphome.config_validation as cv
 from esphome.const import ICON_ARROW_EXPAND_VERTICAL
 from esphome.types import ConfigType
 
-from .climate import PanasonicIrClimate
+from . import CONF_TIMER, CONF_TIMERS_ID, TIMER_SLOTS, RkrTimers
+from .climate import PanasonicIrClimate, panasonic_ir_ns
 
 DEPENDENCIES = ["climate.panasonic_ir"]
 
@@ -39,7 +40,33 @@ CONFIG_SCHEMA = cv.All(
 )
 
 
+RkrTimerModeSelect = panasonic_ir_ns.class_(
+    "RkrTimerModeSelect", select.Select, cg.Component
+)
+CONFIG_SCHEMA = cv.Any(
+    select.select_schema(RkrTimerModeSelect)
+    .extend(
+        {
+            cv.GenerateID(CONF_TIMERS_ID): cv.use_id(RkrTimers),
+            cv.Required(CONF_TIMER): cv.enum(TIMER_SLOTS, upper=True),
+        }
+    )
+    .extend(cv.COMPONENT_SCHEMA),
+    CONFIG_SCHEMA,
+)
+
+
 async def to_code(config: ConfigType) -> None:
+    if CONF_TIMER in config:
+        hub = await cg.get_variable(config[CONF_TIMERS_ID])
+        var = await select.new_select(
+            config,
+            hub,
+            config[CONF_TIMER],
+            options=["Disabled", "Enabled Daily", "Enabled Once"],
+        )
+        await cg.register_component(var, config)
+        return
     var = await cg.get_variable(config[CONF_PANASONIC_IR_ID])
     selects = select.sub_selects(config, parent=var)
     await selects(

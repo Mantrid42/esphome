@@ -133,7 +133,7 @@ This is a diagnostic API, not a timer-control entity. Keep the generic `send_pro
 `dump: all` for timing investigations. No hardware transmission or flashing is performed by unit tests.
 
 
-## Independent HA timer operations (current implementation)
+## Independent HA timer operations (earlier four-switch implementation)
 
 All four timers ON1, ON2, OFF1 and OFF2 are individually addressable. HA stores requested state,
 not confirmed indoor-unit state, and does not import timer settings from received remote frames.
@@ -372,3 +372,41 @@ opposite-type preservation. General independence across every state combination 
 No new raw capture bytes were supplied for these preservation experiments. Tests assert the specified
 packing and software policy, alongside existing genuine capture fixtures; generated frames are not
 labelled as physical captures. Hardware actions require separate user approval.
+
+
+## Timer modes and RKR feature controls (current implementation)
+
+A time edit stores requested local HH:MM without IR. The four mode selects offer Disabled,
+Enabled Daily and Enabled Once. Changing a mode or pressing its Apply sends the slot operation
+described above. Apply All now sends two full frames, ON1/OFF1 then ON2/OFF2, one per scheduler
+interval. Each includes both configured real times and enables. Ordinary climate/vane writes
+remain timer-neutral. Combined writes are software-tested; confirm both pairs on hardware.
+
+Once programs the same recurring hardware timer as Daily. After submission ESPHome records the
+submitted time and an absolute cancellation deadline: 30 minutes after the next matching local
+minute. A repeated DST minute uses the next occurrence; a skipped minute uses the next day on
+which it exists. Ten-second reconciliation checks a valid local clock, including after restart.
+Reboot never reprograms a timer. An overdue cancellation uses the submitted time, changes the
+mode to Disabled, and leaves edited values intact. Missed deadlines while offline can allow a
+hardware recurrence. Configuration or RX updates publish state without triggering another write.
+
+With accept_received_timers enabled, recognised full timer contexts import real times and
+enable states; special times are not imported. A SET may carry an inactive opposite real time:
+that field is not treated as a cancellation. Two real times and neither enable set do not uniquely
+identify the cancelled direction; the decoder leaves the displayed modes alone and retires
+potentially stale cleanup deadlines. A labelled individual CANCEL capture distinguishing ON from
+OFF would resolve this case. Even with import disabled an external replacement invalidates stale
+cleanup. Ordinary frames are not complete timer inventories. The short CANCEL ALL is unambiguous.
+
+The identified ECONAVI ON/OFF commands are explicit requests; POWERFUL/QUIET and NANOE-G are
+momentary actions with no inferred absolute state. Short and full TX echoes are suppressed.
+MILD DRY is retained from COOL B15=7F/80 and applied on matching full writes. Receiving MILD DRY
+ON marks requested ECONAVI off without sending another command. For iAUTO-X the component builds
+a live AUTO/25 C state, then restores the previous mode and temperature (AUTO fallback from OFF).
+Only ordinary frames interpret B25.7 as iAUTO-X; in timer frames the OFF selector owns that bit.
+The captured ordinary B13.3=1 is deliberately cleared on generated ordinary climate frames.
+
+Hardware priorities: test each combined pair with distinct times and verify actual execution;
+run Once across an edit, reboot, due event and cleanup; verify repeated ECONAVI requests, cycle
+buttons and COOL/iAUTO-X return including vanes. Check feature preservation during timer writes,
+especially iAUTO-X with OFF1 selected, and compare actual DST execution with local scheduling.

@@ -33,7 +33,27 @@ CONFIG_SCHEMA = (
 )
 
 
+CONF_ECONAVI = "econavi"
+EconaviSwitch = panasonic_ir_ns.class_("EconaviSwitch", switch.Switch, cg.Component)
+CONFIG_SCHEMA = cv.Any(
+    cv.Schema(
+        {
+            cv.GenerateID(CONF_TIMERS_ID): cv.use_id(RkrTimers),
+            cv.Required(CONF_ECONAVI): switch.switch_schema(
+                EconaviSwitch, default_restore_mode="DISABLED", block_inverted=True
+            ).extend(cv.COMPONENT_SCHEMA),
+        }
+    ),
+    CONFIG_SCHEMA,
+)
+
+
 async def to_code(config: ConfigType) -> None:
     timers = await cg.get_variable(config[CONF_TIMERS_ID])
+    if CONF_ECONAVI in config:
+        conf = config[CONF_ECONAVI]
+        var = await switch.new_switch(conf, timers)
+        await cg.register_component(var, conf)
+        return
     var = await switch.new_switch(config, timers, config[CONF_TIMER])
     await cg.register_component(var, config)

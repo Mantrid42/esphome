@@ -18,6 +18,7 @@ static constexpr const char *FAN_MODE_MINIMUM = "Minimum";
 static constexpr const char *FAN_MODE_MAXIMUM = "Maximum";
 static constexpr const char *const CUSTOM_FAN_MODES[] PROGMEM = {FAN_MODE_MINIMUM, FAN_MODE_MAXIMUM};
 
+class RkrTimers;
 class PanasonicIrClimate final : public climate_ir::ClimateIR {
  public:
   PanasonicIrClimate()
@@ -38,6 +39,9 @@ class PanasonicIrClimate final : public climate_ir::ClimateIR {
   /// Diagnostic API entry point. Validates hex framing and regenerates the checksum before sending.
   bool send_command_hex(const std::string &hex);
 #ifdef USE_PANASONIC_RKR_TIMERS
+  RkrTimers *timer_controller{};
+  void send_short(uint8_t a, uint8_t b);
+  void toggle_iauto();
   bool send_timer_state(const RkrTimerFields &timers);
 #endif
 
@@ -77,6 +81,10 @@ class PanasonicIrClimate final : public climate_ir::ClimateIR {
   // The time and second section of the last frame sent, so its echo is not taken for the remote. The time starts
   // outside the echo window.
   uint32_t echo_sent_ms_{UINT32_MAX / 2};
+  uint8_t echo_length_{STATE_LENGTH};
+  bool mild_dry_{false}, iauto_{false};
+  climate::ClimateMode return_mode_{climate::CLIMATE_MODE_HEAT_COOL};
+  float return_temperature_{25};
   uint8_t echo_[SECTION2_LENGTH]{};
   // The fixed vane position (1 to 5) used while swing is off. 0 until one is chosen, then heat blows down and the
   // other modes up

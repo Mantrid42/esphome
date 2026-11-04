@@ -1,3 +1,4 @@
+#include "panasonic_rkr_timers.h"
 #include "panasonic_ir.h"
 
 #include <cmath>
@@ -192,7 +193,51 @@ void PanasonicIrClimate::build_state_(uint8_t *state) {
   params.vane_h = this->horizontal_vane_position_;
 
   encode_frame(params, state);
+  if (this->model_ == Model::RKR) {
+    if (params.mode == Mode::COOL && this->mild_dry_)
+      state[15] = 0x7F;
+    if (this->mode != climate::CLIMATE_MODE_HEAT_COOL)
+      this->iauto_ = false;
+    if (this->iauto_)
+      state[25] |= 0x80;
+    state[26] = calc_checksum(state, STATE_LENGTH);
+  }
 }
+
+#ifdef USE_PANASONIC_RKR_TIMERS
+void PanasonicIrClimate::send_short(uint8_t a, uint8_t b) {
+  if (this->model_ != Model::RKR)
+    return;
+  uint8_t payload[]{0x80, a, b}, frame[SHORT_COMMAND_LENGTH];
+  encode_short_command(payload, frame);
+  this->echo_length_ = sizeof(frame);
+  this->echo_sent_ms_ = millis();
+  memcpy(this->echo_, frame + 8, 8);
+  char hex[format_hex_pretty_size(SHORT_COMMAND_LENGTH)];
+  ESP_LOGI(TAG, "TX short: %s", format_hex_pretty_to(hex, frame, sizeof(frame), ' '));
+  auto tx = this->transmitter_->transmit();
+  encode_waveform(*tx.get_data(), frame);
+  tx.perform();
+}
+void PanasonicIrClimate::toggle_iauto() {
+  if (this->model_ != Model::RKR)
+    return;
+  if (!this->iauto_) {
+    this->return_mode_ = this->mode == climate::CLIMATE_MODE_OFF ? climate::CLIMATE_MODE_HEAT_COOL : this->mode;
+    this->return_temperature_ = this->target_temperature;
+    this->mode = climate::CLIMATE_MODE_HEAT_COOL;
+    this->target_temperature = 25;
+    this->iauto_ = true;
+  } else {
+    this->mode = this->return_mode_ == climate::CLIMATE_MODE_OFF ? climate::CLIMATE_MODE_HEAT_COOL : this->return_mode_;
+    this->target_temperature = this->return_temperature_;
+    this->iauto_ = false;
+  }
+  this->preset = climate::CLIMATE_PRESET_NONE;
+  this->transmit_state();
+  this->publish_state();
+}
+#endif
 
 void PanasonicIrClimate::transmit_state() {
   uint8_t state[STATE_LENGTH];
@@ -206,6 +251,7 @@ void PanasonicIrClimate::send_state_(const uint8_t (&state)[STATE_LENGTH]) {
   char hex[format_hex_pretty_size(STATE_LENGTH)];
   ESP_LOGD(TAG, "TX full state B13=%02X B19=%02X B20=%02X B25=%02X: %s", state[13], state[19], state[20], state[25],
            format_hex_pretty_to(hex, state, STATE_LENGTH, ' '));
+  this->echo_length_ = STATE_LENGTH;
   memcpy(this->echo_, state + SECTION1_LENGTH, SECTION2_LENGTH);
   this->echo_sent_ms_ = millis();
 
@@ -221,11 +267,28 @@ bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
   if (status == CommandStatus::COMMAND_STATUS_UNRELATED)
     return false;
   this->log_command_(command, status);
-  if (status == CommandStatus::COMMAND_STATUS_INCOMPLETE || status == CommandStatus::COMMAND_STATUS_INVALID_CHECKSUM ||
-      command.length != STATE_LENGTH)
+  if (status == CommandStatus::COMMAND_STATUS_INCOMPLETE || status == CommandStatus::COMMAND_STATUS_INVALID_CHECKSUM)
     return false;
   const uint8_t *state = command.bytes;
-
+  if (command.length == this->echo_length_ && millis() - this->echo_sent_ms_ < ECHO_WINDOW_MS &&
+      memcmp(state + SECTION1_LENGTH, this->echo_, command.length - SECTION1_LENGTH) == 0) {
+    this->echo_sent_ms_ -= ECHO_WINDOW_MS;
+    return true;
+  }
+  if (command.length != STATE_LENGTH) {
+#ifdef USE_PANASONIC_RKR_TIMERS
+    if (!this->timer_controller || status != CommandStatus::COMMAND_STATUS_VALID_KNOWN)
+      return false;
+    auto action = short_action(command, this->model_);
+    if (action == ShortAction::SHORT_ACTION_CANCEL_ALL)
+      this->timer_controller->cancel_all(false);
+    if (action == ShortAction::SHORT_ACTION_ECONAVI_ON || action == ShortAction::SHORT_ACTION_ECONAVI_OFF)
+      this->timer_controller->observe_features(action == ShortAction::SHORT_ACTION_ECONAVI_ON);
+    return true;
+#else
+    return false;
+#endif
+  }
   FrameParams params;
   params.model = this->model_;
   if (!decode_frame(state, params)) {
@@ -233,15 +296,32 @@ bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
     return false;
   }
 
-  // A receiver near the transmitter hears our own frame. Applying it would flip the CKP power toggle back and store
-  // the vane position derived from the mode as one the user chose.
-  if (millis() - this->echo_sent_ms_ < ECHO_WINDOW_MS &&
-      memcmp(state + SECTION1_LENGTH, this->echo_, SECTION2_LENGTH) == 0) {
-    ESP_LOGD(TAG, "Ignoring the echo of our own frame");
-    this->echo_sent_ms_ -= ECHO_WINDOW_MS;  // only the first echo
-    return true;
+  if (this->model_ == Model::RKR) {
+    if (state[23] == 0x89) {
+      bool active = params.power && params.mode == Mode::AUTO && (state[25] & 0x80);
+      if (active && !this->iauto_) {
+        this->return_mode_ = this->mode;
+        this->return_temperature_ = this->target_temperature;
+      }
+      this->iauto_ = active;
+      if (params.mode == Mode::COOL && (state[15] == 0x7F || state[15] == 0x80)) {
+        this->mild_dry_ = state[15] == 0x7F;
+#ifdef USE_PANASONIC_RKR_TIMERS
+        if (this->mild_dry_ && this->timer_controller)
+          this->timer_controller->observe_features(false);
+#endif
+      }
+    }
+#ifdef USE_PANASONIC_RKR_TIMERS
+    // Only this ordinary OFF pattern was isolated on hardware: ON1 specifically was cancelled.
+    if (this->timer_controller && state[13] == 0x68 && has_rkr_ordinary_timer_fields(command) &&
+        status == CommandStatus::COMMAND_STATUS_VALID_KNOWN) {
+      this->timer_controller->observe_on1_cancel();
+    }
+    if (has_first_section(state, command.length) && state[23] == 0x80 && (state[13] & 8) && this->timer_controller)
+      this->timer_controller->receive_timer(decode_rkr_timers(state));
+#endif
   }
-
   this->apply_received_(params);
   return true;
 }

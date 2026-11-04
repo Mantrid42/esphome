@@ -114,8 +114,10 @@ void PanasonicIrClimate::log_command_(const Command &command, CommandStatus stat
              : mode == static_cast<uint8_t>(Mode::COOL) && b[15] == 0x80 ? LOG_STR_LITERAL("OFF encoding")
                                                                          : LOG_STR_LITERAL("unknown in this context"),
              b[15]);
-    ESP_LOGD(TAG, "  iAUTO-X candidate=%u (AUTO and B25.7, observed only; not a universal timer-slot flag)",
-             b[23] == 0x89 && mode == static_cast<uint8_t>(Mode::AUTO) && (b[25] & 0x80));
+    if (b[23] == 0x89) {
+      ESP_LOGD(TAG, "  iAUTO-X operating-frame encoding=%u",
+               (b[13] & 1) && mode == static_cast<uint8_t>(Mode::AUTO) && (b[25] & 0x80));
+    }
   }
   ESP_LOGD(TAG, "  Model/unknown fields: B12=%02X B13=%02X B14=%02X B15=%02X B17=%02X", b[12], b[13], b[14], b[15],
            b[17]);
@@ -131,10 +133,9 @@ bool PanasonicIrClimate::send_command_hex(const std::string &hex) {
   char formatted[format_hex_pretty_size(STATE_LENGTH)];
   ESP_LOGI(TAG, "TX %u bytes (checksum calculated): %s", static_cast<unsigned>(command.length),
            format_hex_pretty_to(formatted, command.bytes, command.length, ' '));
-  if (command.length == STATE_LENGTH) {
-    memcpy(this->echo_, command.bytes + SECTION1_LENGTH, SECTION2_LENGTH);
-    this->echo_sent_ms_ = millis();
-  }
+  this->echo_length_ = command.length;
+  memcpy(this->echo_, command.bytes + SECTION1_LENGTH, command.length - SECTION1_LENGTH);
+  this->echo_sent_ms_ = millis();
   auto transmit = this->transmitter_->transmit();
   if (command.length == SHORT_COMMAND_LENGTH) {
     uint8_t short_frame[SHORT_COMMAND_LENGTH];

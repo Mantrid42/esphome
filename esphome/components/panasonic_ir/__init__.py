@@ -10,6 +10,7 @@ from .climate import PanasonicIrClimate, panasonic_ir_ns
 
 DOMAIN = "panasonic_ir"
 DEPENDENCIES = ["climate.panasonic_ir", "time"]
+CONF_ACCEPT_RECEIVED_TIMERS = "accept_received_timers"
 CONF_TIMERS_ID = "timers_id"
 CONF_TIMER = "timer"
 RkrTimers = panasonic_ir_ns.class_("RkrTimers", cg.Component)
@@ -20,6 +21,7 @@ CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(RkrTimers),
         cv.Required(CONF_CLIMATE_ID): cv.use_id(PanasonicIrClimate),
+        cv.Optional(CONF_ACCEPT_RECEIVED_TIMERS, default=False): cv.boolean,
         cv.Required(CONF_TIME_ID): cv.use_id(time.RealTimeClock),
     }
 ).extend(cv.COMPONENT_SCHEMA)
@@ -37,5 +39,6 @@ async def to_code(config: ConfigType) -> None:
     climate = await cg.get_variable(config[CONF_CLIMATE_ID])
     clock = await cg.get_variable(config[CONF_TIME_ID])
     var = cg.new_Pvariable(config[CONF_ID], climate, clock)
+    cg.add(var.set_accept_received_timers(config[CONF_ACCEPT_RECEIVED_TIMERS]))
     await cg.register_component(var, config)
     cg.add_define("USE_PANASONIC_RKR_TIMERS")

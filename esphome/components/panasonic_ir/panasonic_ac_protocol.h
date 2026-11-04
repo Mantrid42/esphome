@@ -94,6 +94,13 @@ inline CommandStatus classify_command(const Command &command, Model model) {
     expected[13] |= command.bytes[13] & 0x06;
     expected[26] = calc_checksum(expected, STATE_LENGTH);
   }
+  if (model == Model::RKR && command.bytes[23] == 0x89) {
+    if (params.mode == Mode::COOL && command.bytes[15] == 0x7F)
+      expected[15] = 0x7F;
+    if (params.power && params.mode == Mode::AUTO && command.bytes[25] == 0x80)
+      expected[25] = 0x80;
+    expected[26] = calc_checksum(expected, STATE_LENGTH);
+  }
   // Known encoding does not imply every flag's physical effect has been verified.
   return memcmp(expected, command.bytes, STATE_LENGTH) == 0 ? CommandStatus::COMMAND_STATUS_VALID_KNOWN
                                                             : CommandStatus::COMMAND_STATUS_VALID_UNKNOWN;
