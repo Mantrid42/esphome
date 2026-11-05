@@ -199,20 +199,24 @@ inline size_t receive_section(remote_base::RemoteReceiveData &data, uint8_t *byt
 /// The 10 ms gap between the sections is as long as the default idle time, so a capture holds the whole frame or
 /// one section. The first section is constant and outside the checksum, so a lone second section is enough and a
 /// lone first section is ignored.
-inline bool read_state(remote_base::RemoteReceiveData &data, uint8_t *state) {
+inline bool read_state(remote_base::RemoteReceiveData &data, uint8_t *state, bool *short_command = nullptr) {
   uint8_t section[SECTION2_LENGTH];
   size_t len = receive_section(data, section);
 
   uint8_t expected[STATE_LENGTH];
   fill_template(expected);
 
-  if (len == SECTION1_LENGTH) {
-    if (memcmp(section, expected, SECTION1_LENGTH) != 0)
-      return false;
+  if (len == SECTION1_LENGTH && memcmp(section, expected, SECTION1_LENGTH) == 0) {
     // The gap and the second section follow in a full capture. Anything else is just the receiver's idle space
     if (!data.is_valid(1) || !data.expect_space(SECTION_GAP))
       return false;
     len = receive_section(data, section);
+  }
+  if (short_command && len == SECTION1_LENGTH && memcmp(section, expected + SECTION1_LENGTH, 4) == 0 &&
+      section[4] == 0x80 && section[7] == sum_bytes(section, 7)) {
+    *short_command = true;
+    memcpy(state + SECTION1_LENGTH, section, len);
+    return true;
   }
   if (len != SECTION2_LENGTH)
     return false;

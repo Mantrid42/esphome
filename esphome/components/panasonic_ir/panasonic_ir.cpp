@@ -198,8 +198,20 @@ void PanasonicIrClimate::send_state_(const uint8_t *state, size_t length) {
 
 bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
   uint8_t state[STATE_LENGTH];
+#ifdef USE_PANASONIC_RKR_TIMERS
+  bool short_command = false;
+  if (!read_state(data, state, this->timer_controller_ ? &short_command : nullptr))
+    return false;
+  if (short_command) {
+    if (state[13] != 0xB6 || state[14] != 0x32)
+      return false;
+    this->timer_controller_->observe_cancel_all();
+    return true;
+  }
+#else
   if (!read_state(data, state))
     return false;
+#endif
 
   FrameParams params;
   params.model = this->model_;
