@@ -5,14 +5,16 @@ from esphome.const import CONF_INITIAL_STATE, CONF_RESTORE_MODE, CONF_RESTORE_ST
 from esphome.types import ConfigType
 
 from . import CONF_TIMER, CONF_TIMERS_ID, TIMER_SLOTS, RkrTimers
-from .climate import panasonic_ir_ns
-
-DEPENDENCIES = ["panasonic_ir"]
-RkrTimerSwitch = panasonic_ir_ns.class_("RkrTimerSwitch", switch.Switch, cg.Component)
-
-from .climate import CONF_PANASONIC_IR_ID, PanasonicIrClimate, validate_rkr
+from .climate import (
+    CONF_PANASONIC_IR_ID,
+    PanasonicIrClimate,
+    panasonic_ir_ns,
+    validate_rkr,
+)
 
 DEPENDENCIES = ["climate.panasonic_ir"]
+RkrTimerSwitch = panasonic_ir_ns.class_("RkrTimerSwitch", switch.Switch, cg.Component)
+
 
 TIMER_SCHEMA = (
     switch.switch_schema(
