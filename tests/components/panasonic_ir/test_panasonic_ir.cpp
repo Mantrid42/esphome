@@ -805,6 +805,27 @@ TEST(PanasonicClimate, IautoButtonAlwaysEnables) {
   }
 }
 
+TEST(PanasonicClimate, IautoRemembersLocalAndRemoteTargets) {
+  Fixture remote(Model::RKR);
+  Fixture listener(Model::RKR);
+  remote.climate.enable_iauto();
+  remote.command([](auto &call) { call.set_target_temperature(23); });
+  ASSERT_TRUE(listener.receive(remote.transmitter.frames.back()));
+  for (auto *fixture : {&remote, &listener}) {
+    fixture->command([](auto &call) {
+      call.set_mode(climate::CLIMATE_MODE_HEAT);
+      call.set_target_temperature(28);
+      call.set_fan_mode(climate::CLIMATE_FAN_HIGH);
+    });
+    fixture->climate.enable_iauto();
+    EXPECT_EQ(fixture->last_state()[14], 46);
+    EXPECT_EQ(fixture->climate.fan_mode.value(), climate::CLIMATE_FAN_AUTO);
+    const auto transmissions = fixture->transmitter.frames.size();
+    fixture->command([](auto &call) { call.set_fan_mode("Maximum"); });
+    EXPECT_EQ(fixture->transmitter.frames.size(), transmissions);
+  }
+}
+
 #ifdef USE_SWITCH
 class ObservedSwitch : public switch_::Switch {
  protected:
