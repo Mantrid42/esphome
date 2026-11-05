@@ -27,40 +27,36 @@ bool RkrTimers::get_enabled(TimerSlot slot) const {
 }
 
 bool RkrTimers::set_minutes(TimerSlot slot, uint16_t minutes) {
-  if (!valid_timer_slot(slot) || !valid_timer_minutes(minutes)) {
-    ESP_LOGW(TAG, "Invalid timer slot/time: use HH:00/10/20/30/40/50 with zero seconds");
-    return false;
-  }
-  this->settings_.minutes[static_cast<uint8_t>(slot)] = minutes;
-  this->preference_.save(&this->settings_);
-  this->apply(slot);
-  return true;
+  return this->set_timer(slot, minutes, this->get_enabled(slot));
 }
 
 void RkrTimers::set_enabled(TimerSlot slot, bool enabled) {
-  if (!valid_timer_slot(slot))
-    return;
-  this->settings_.enabled[static_cast<uint8_t>(slot)] = enabled;
-  this->preference_.save(&this->settings_);
-  this->apply(slot);
+  this->set_timer(slot, this->get_minutes(slot), enabled);
 }
 
 bool RkrTimers::apply(TimerSlot slot) {
-  if (!valid_timer_slot(slot))
-    return false;
-  const auto now = this->clock_->now();
-  if (!now.is_valid()) {
-    ESP_LOGW(TAG, "Timer intent saved, but no IR sent: local clock invalid. Apply again after time sync");
-    return false;
-  }
-  RkrTimerFields fields;
-  if (!make_rkr_timer_operation(slot, this->get_minutes(slot), this->get_enabled(slot), now.hour * 60 + now.minute,
-                                fields))
-    return false;
-  return this->climate_->send_timer_state(fields);
+  return this->set_timer(slot, this->get_minutes(slot), this->get_enabled(slot));
 }
 
-bool PanasonicIrClimate::send_timer_state(const RkrTimerFields &timers) {
+bool RkrTimers::set_timer(TimerSlot slot, uint16_t minutes, bool enabled, optional<bool> power,
+                          const uint8_t (*operating_frame)[STATE_LENGTH]) {
+  if (!valid_timer_slot(slot) || !valid_timer_minutes(minutes))
+    return false;
+  const auto now = this->clock_->now();
+  RkrTimerFields fields;
+  if (!now.is_valid() || !make_rkr_timer_operation(slot, minutes, enabled, now.hour * 60 + now.minute, fields) ||
+      !this->climate_->send_timer_state(fields, power, operating_frame))
+    return false;
+  const auto index = static_cast<size_t>(slot);
+  this->settings_.minutes[index] = minutes;
+  this->settings_.enabled[index] = enabled;
+  this->preference_.save(&this->settings_);
+  this->refresh_(index);
+  return true;
+}
+
+bool PanasonicIrClimate::send_timer_state(const RkrTimerFields &timers, optional<bool> power,
+                                         const uint8_t (*operating_frame)[STATE_LENGTH]) {
   const bool preserve_on = timers.on_enabled && timers.on_minutes == TIMER_TIME_SPECIAL;
   const bool preserve_off = timers.off_enabled && timers.off_minutes == TIMER_TIME_SPECIAL;
   if (this->model_ != Model::RKR || !timers.on_unknown_flag || !timers.off_unknown_flag ||
@@ -68,7 +64,17 @@ bool PanasonicIrClimate::send_timer_state(const RkrTimerFields &timers) {
         (preserve_off && valid_timer_minutes(timers.on_minutes))))
     return false;
   uint8_t state[STATE_LENGTH];
-  this->build_state_(state);
+  if (operating_frame != nullptr) {
+    FrameParams params;
+    params.model = Model::RKR;
+    if ((*operating_frame)[23] != 0x89 || !decode_frame(*operating_frame, params))
+      return false;
+    memcpy(state, *operating_frame, sizeof(state));
+  } else {
+    this->build_state_(state);
+  }
+  if (power.has_value())
+    state[13] = (state[13] & ~1U) | *power;
   if (!encode_rkr_timers(timers, state))
     return false;
   this->send_state_(state, STATE_LENGTH);
