@@ -1,7 +1,8 @@
 import esphome.codegen as cg
 from esphome.components import select
 import esphome.config_validation as cv
-from esphome.const import ICON_ARROW_EXPAND_VERTICAL
+from esphome.const import CONF_MODEL, ICON_ARROW_EXPAND_VERTICAL
+import esphome.final_validate as fv
 from esphome.types import ConfigType
 
 from .climate import PanasonicIrClimate
@@ -15,7 +16,7 @@ CONF_HORIZONTAL_VANE_POSITION = "horizontal_vane_position"
 # Option 0 is auto, the others are the fixed positions of the vertical vane from the highest to the lowest
 VANE_POSITIONS = ["Swing", "Up", "High", "Middle", "Low", "Down"]
 HORIZONTAL_VANE_POSITIONS = [
-    "Swing",
+    "Auto",
     "Left",
     "Middle Left",
     "Middle",
@@ -37,6 +38,16 @@ CONFIG_SCHEMA = cv.All(
     ),
     cv.has_at_least_one_key(CONF_VANE_POSITION, CONF_HORIZONTAL_VANE_POSITION),
 )
+
+
+def _validate_horizontal(config: ConfigType) -> None:
+    if CONF_HORIZONTAL_VANE_POSITION in config:
+        model = fv.get_declaring_config(config[CONF_PANASONIC_IR_ID])[CONF_MODEL]
+        if model not in ("DKE", "RKR"):
+            raise cv.Invalid("Horizontal vane position requires model DKE or RKR")
+
+
+FINAL_VALIDATE_SCHEMA = _validate_horizontal
 
 
 async def to_code(config: ConfigType) -> None:
