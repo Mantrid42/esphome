@@ -18,7 +18,6 @@ class RkrTimerTime : public datetime::TimeEntity, public Component {
     const uint8_t hour = call.get_hour().value_or(this->hour_);
     const uint8_t minute = call.get_minute().value_or(this->minute_);
     this->timers_->set_minutes(this->slot_, hour * 60 + minute / 10 * 10);
-    this->publish_minutes(this->timers_->get_minutes(this->slot_));
   }
 
  public:

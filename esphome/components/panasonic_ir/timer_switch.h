@@ -15,7 +15,6 @@ class RkrTimerSwitch : public switch_::Switch, public Component {
  protected:
   void write_state(bool state) override {
     this->timers_->set_enabled(this->slot_, state);
-    this->publish_state(this->timers_->get_enabled(this->slot_));
   }
   RkrTimers *timers_;
   TimerSlot slot_;

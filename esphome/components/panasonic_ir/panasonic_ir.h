@@ -33,7 +33,8 @@ class PanasonicIrClimate final : public climate_ir::ClimateIR {
   void set_model(Model model) { this->model_ = model; }
 #ifdef USE_PANASONIC_RKR_TIMERS
   void set_timer_controller(RkrTimers *controller) { this->timer_controller_ = controller; }
-  bool send_timer_state(const RkrTimerFields &timers);
+  bool send_timer_state(const RkrTimerFields &timers, optional<bool> power = {},
+                        const uint8_t (*operating_frame)[STATE_LENGTH] = nullptr);
   void send_cancel_all();
 #endif
   void setup() override;

@@ -28,6 +28,9 @@ class RkrTimers : public Component {
   bool get_enabled(TimerSlot slot) const;
   bool set_minutes(TimerSlot slot, uint16_t minutes);
   void set_enabled(TimerSlot slot, bool enabled);
+  // Optional operating context applies to this frame only.
+  bool set_timer(TimerSlot slot, uint16_t minutes, bool enabled, optional<bool> power = {},
+                 const uint8_t (*operating_frame)[STATE_LENGTH] = nullptr);
   bool apply(TimerSlot slot);
   void cancel_all();
   void observe_cancel_all();

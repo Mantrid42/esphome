@@ -916,4 +916,18 @@ TEST(PanasonicTimers, NormalisesTimeAndImportsRemoteSetWithoutEcho) {
   EXPECT_EQ(f.transmitter.frames.size(), 1u);
 }
 
+TEST(PanasonicTimers, AtomicSlotWriteOverridesOnlyTransmittedPower) {
+  Fixture f(Model::RKR);
+  TimerClock clock;
+  RkrTimers timers(&f.climate, &clock);
+  timers.setup();
+  f.command([](auto &call) { call.set_mode(climate::CLIMATE_MODE_COOL); });
+  const auto before = f.transmitter.frames.size();
+  ASSERT_TRUE(timers.set_timer(TimerSlot::TIMER_SLOT_OFF2, 840, false, false));
+  EXPECT_EQ(f.transmitter.frames.size(), before + 1);
+  EXPECT_EQ(f.last_state()[13] & 1, 0);
+  EXPECT_EQ(f.climate.mode, climate::CLIMATE_MODE_COOL);
+  EXPECT_EQ(timers.get_minutes(TimerSlot::TIMER_SLOT_OFF2), 840);
+}
+
 }  // namespace esphome::panasonic_ir::testing
