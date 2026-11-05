@@ -96,6 +96,8 @@ void PanasonicIrClimate::sync_horizontal_vane_select_() {
 }
 
 void PanasonicIrClimate::control(const climate::ClimateCall &call) {
+  if (call.get_mode().has_value())
+    this->iauto_ = false;
   // The base class only knows about the regular fan modes
   if (call.has_custom_fan_mode()) {
     this->set_custom_fan_mode_(call.get_custom_fan_mode());
@@ -194,7 +196,7 @@ void PanasonicIrClimate::build_state_(uint8_t *state) {
 
   encode_frame(params, state);
   if (this->model_ == Model::RKR) {
-    this->iauto_ &= this->mode == climate::CLIMATE_MODE_HEAT_COOL;
+    this->iauto_ = this->iauto_ && this->mode == climate::CLIMATE_MODE_HEAT_COOL;
     if (this->iauto_)
       state[25] |= 0x80;
     if (this->mode == climate::CLIMATE_MODE_COOL && this->mild_dry_)
