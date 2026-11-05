@@ -793,4 +793,16 @@ TEST(PanasonicClimate, HearsItsOwnTransmissions) {
   }
 }
 
+TEST(PanasonicClimate, IautoButtonAlwaysEnables) {
+  Fixture f(Model::RKR);
+  for (int press = 0; press < 2; ++press) {
+    f.climate.enable_iauto();
+    auto bytes = f.last_state();
+    EXPECT_EQ(bytes[13], 1);
+    EXPECT_EQ(bytes[14], 50);
+    EXPECT_EQ(bytes[25], 0x80);
+    EXPECT_EQ(f.climate.fan_mode.value(), climate::CLIMATE_FAN_AUTO);
+  }
+}
+
 }  // namespace esphome::panasonic_ir::testing

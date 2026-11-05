@@ -6,6 +6,9 @@
 #ifdef USE_SELECT
 #include "esphome/components/select/select.h"
 #endif
+#ifdef USE_SWITCH
+#include "esphome/components/switch/switch.h"
+#endif
 #include "panasonic_ac_frame.h"
 
 namespace esphome::panasonic_ir {
@@ -38,6 +41,16 @@ class PanasonicIrClimate final : public climate_ir::ClimateIR {
   SUB_SELECT(vane)
 #endif
 
+  void enable_iauto();
+  void send_powerful_quiet() { this->send_short_(0x9C, 0x32); }
+  void send_nanoe_g() { this->send_short_(0x61, 0x33); }
+#ifdef USE_SWITCH
+  SUB_SWITCH(econavi)
+  SUB_SWITCH(mild_dry)
+  void set_econavi(bool enabled);
+  void set_mild_dry(bool enabled);
+#endif
+
  protected:
   void control(const climate::ClimateCall &call) override;
 
@@ -51,6 +64,9 @@ class PanasonicIrClimate final : public climate_ir::ClimateIR {
   void sync_vane_select_();
   void apply_received_(const FrameParams &params);
 
+  void send_short_(uint8_t first, uint8_t second);
+  bool mild_dry_{false};
+  bool iauto_{false};
   Model model_{Model::JKE};
   // The remote has no concept of "off" mode, so remember what to send along with the power bit
   Mode last_mode_{Mode::AUTO};
