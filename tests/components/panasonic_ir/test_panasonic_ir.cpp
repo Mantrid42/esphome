@@ -805,4 +805,30 @@ TEST(PanasonicClimate, IautoButtonAlwaysEnables) {
   }
 }
 
+#ifdef USE_SWITCH
+class ObservedSwitch : public switch_::Switch {
+ protected:
+  void write_state(bool state) override { this->publish_state(state); }
+};
+
+TEST(PanasonicClimate, RemoteMildDryClearsEconaviWithoutTransmitting) {
+  Fixture remote(Model::RKR);
+  Fixture listener(Model::RKR);
+  ObservedSwitch eco;
+  ObservedSwitch dry;
+  listener.climate.set_econavi_switch(&eco);
+  listener.climate.set_mild_dry_switch(&dry);
+  remote.climate.set_econavi(true);
+  ASSERT_TRUE(listener.receive(remote.transmitter.frames.back()));
+  EXPECT_TRUE(eco.state);
+  remote.command([](auto &call) { call.set_mode(climate::CLIMATE_MODE_COOL); });
+  remote.climate.set_mild_dry(true);
+  ASSERT_TRUE(listener.receive(remote.transmitter.frames.back()));
+  EXPECT_FALSE(eco.state);
+  EXPECT_TRUE(dry.state);
+  listener.climate.set_econavi(true);
+  EXPECT_TRUE(listener.transmitter.frames.empty());
+}
+#endif
+
 }  // namespace esphome::panasonic_ir::testing

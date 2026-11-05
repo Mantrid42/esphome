@@ -7,11 +7,20 @@ from .climate import CONF_PANASONIC_IR_ID, PanasonicIrClimate, validate_rkr
 
 DEPENDENCIES = ["climate.panasonic_ir"]
 
-CONFIG_SCHEMA = cv.All(cv.Schema({
-    cv.GenerateID(CONF_PANASONIC_IR_ID): cv.use_id(PanasonicIrClimate),
-    cv.Optional("econavi"): switch.switch_schema(switch.ApplySwitch, default_restore_mode="DISABLED", block_inverted=True),
-    cv.Optional("mild_dry"): switch.switch_schema(switch.ApplySwitch, default_restore_mode="DISABLED", block_inverted=True),
-}), cv.has_at_least_one_key('econavi', 'mild_dry'))
+CONFIG_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.GenerateID(CONF_PANASONIC_IR_ID): cv.use_id(PanasonicIrClimate),
+            cv.Optional("econavi"): switch.switch_schema(
+                switch.ApplySwitch, default_restore_mode="DISABLED", block_inverted=True
+            ),
+            cv.Optional("mild_dry"): switch.switch_schema(
+                switch.ApplySwitch, default_restore_mode="DISABLED", block_inverted=True
+            ),
+        }
+    ),
+    cv.has_at_least_one_key("econavi", "mild_dry"),
+)
 FINAL_VALIDATE_SCHEMA = validate_rkr
 
 
