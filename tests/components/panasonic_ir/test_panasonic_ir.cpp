@@ -1,3 +1,4 @@
+#include "esphome/components/panasonic_ir/panasonic_rkr_timer_frame.h"
 #include <gtest/gtest.h>
 #include <cstdint>
 #include <cstring>
@@ -790,6 +791,98 @@ TEST(PanasonicClimate, HearsItsOwnTransmissions) {
     EXPECT_EQ(g.climate.mode, climate::CLIMATE_MODE_COOL);
     EXPECT_FLOAT_EQ(g.climate.target_temperature, 22.0f);
     EXPECT_EQ(g.climate.get_custom_fan_mode(), "Minimum");
+  }
+}
+
+static const uint8_t TIMER_CAPTURES[][STATE_LENGTH] = {
+    {0x02, 0x20, 0xE0, 0x04, 0,    0,    0,    0x06, 0x02, 0x20, 0xE0, 0x04, 0,   0x3B,
+     0x38, 0x80, 0x32, 0x0A, 0x68, 0x29, 0xD8, 0,    0,    0x80, 0xCC, 0x04, 0xEE},
+    {0x02, 0x20, 0xE0, 0x04, 0,    0,    0,    0x06, 0x02, 0x20, 0xE0, 0x04, 0,   0x3B,
+     0x38, 0x80, 0x32, 0x0A, 0xFC, 0x2B, 0xD8, 0,    0,    0x80, 0xCB, 0x44, 0xC3},
+    {0x02, 0x20, 0xE0, 0x04, 0,    0,    0,    0x06, 0x02, 0x20, 0xE0, 0x04, 0,   0x3D,
+     0x38, 0x80, 0x32, 0x0A, 0x68, 0x29, 0xD8, 0,    0,    0x80, 0xD5, 0x04, 0xF9},
+    {0x02, 0x20, 0xE0, 0x04, 0,    0,    0,    0x06, 0x02, 0x20, 0xE0, 0x04, 0,   0x3D,
+     0x38, 0x80, 0x32, 0x0A, 0x68, 0x29, 0x88, 0,    0,    0x80, 0xD5, 0x84, 0x29},
+};
+
+TEST(PanasonicTimers, ReproducesReferenceTimerFieldsExactly) {
+  const uint16_t on[]{360, 1020, 360, 360};
+  const uint16_t off[]{1410, 1410, 1410, 130};
+  const uint16_t clock[]{1228, 1227, 1237, 1237};
+  for (size_t i = 0; i < 4; i++) {
+    auto fields = decode_rkr_timers(TIMER_CAPTURES[i]);
+    EXPECT_EQ(fields.on_minutes, on[i]);
+    EXPECT_EQ(fields.off_minutes, off[i]);
+    EXPECT_EQ(fields.clock_minutes, clock[i]);
+    EXPECT_EQ(fields.on_slot2, i == 1);
+    EXPECT_EQ(fields.off_slot2, i == 3);
+    EXPECT_EQ(fields.on_enabled, i < 2);
+    EXPECT_EQ(fields.off_enabled, i >= 2);
+    EXPECT_TRUE(fields.on_unknown_flag);
+    EXPECT_TRUE(fields.off_unknown_flag);
+    uint8_t encoded[STATE_LENGTH];
+    memcpy(encoded, TIMER_CAPTURES[i], STATE_LENGTH);
+    for (const size_t index : {13, 18, 19, 20, 23, 24, 25, 26})
+      encoded[index] = index == 13 ? 0x31 : 0;
+    ASSERT_TRUE(encode_rkr_timers(fields, encoded));
+    EXPECT_EQ(frame(encoded), frame(TIMER_CAPTURES[i]));
+  }
+}
+
+TEST(PanasonicTimers, EveryTenMinuteTimeAndEnableCombinationPreservesOperatingBytes) {
+  for (uint16_t minutes = 0; minutes < 1440; minutes += 10) {
+    for (uint8_t flags = 0; flags < 4; flags++) {
+      uint8_t encoded[STATE_LENGTH];
+      memcpy(encoded, TIMER_CAPTURES[0], STATE_LENGTH);
+      const RkrTimerFields fields{.on_minutes = minutes,
+                                  .off_minutes = static_cast<uint16_t>(1430 - minutes),
+                                  .clock_minutes = 1439,
+                                  .on_enabled = (flags & 1) != 0,
+                                  .off_enabled = (flags & 2) != 0};
+      ASSERT_TRUE(encode_rkr_timers(fields, encoded));
+      EXPECT_EQ(encoded[13], 0x39 | ((flags & 1) << 1) | ((flags & 2) << 1));
+      EXPECT_EQ(encoded[23], 0x80);
+      EXPECT_EQ(encoded[25], 0xC5);
+      EXPECT_EQ(encoded[24], 0x9F);
+      EXPECT_EQ(encoded[26], sum_bytes(encoded + 8, 18));
+      const auto decoded = decode_rkr_timers(encoded);
+      EXPECT_EQ(decoded.on_minutes, minutes);
+      EXPECT_EQ(decoded.off_minutes, 1430 - minutes);
+      EXPECT_EQ(decoded.clock_minutes, 1439);
+      for (size_t i = 0; i < 27; i++)
+        if (i != 13 && i != 18 && i != 19 && i != 20 && i != 23 && i != 24 && i != 25 && i != 26)
+          EXPECT_EQ(encoded[i], TIMER_CAPTURES[0][i]);
+    }
+  }
+}
+
+TEST(PanasonicTimers, InvalidValuesDoNotModifyFrameAndFlagsAreIndependent) {
+  for (uint16_t invalid : {1, 359, 1440, 65535}) {
+    uint8_t encoded[STATE_LENGTH];
+    memcpy(encoded, TIMER_CAPTURES[0], STATE_LENGTH);
+    RkrTimerFields fields;
+    fields.on_minutes = invalid;
+    EXPECT_FALSE(encode_rkr_timers(fields, encoded));
+    EXPECT_EQ(frame(encoded), frame(TIMER_CAPTURES[0]));
+    fields.on_minutes = 360;
+    fields.off_minutes = invalid;
+    EXPECT_FALSE(encode_rkr_timers(fields, encoded));
+  }
+  for (uint8_t flags = 0; flags < 16; flags++) {
+    uint8_t encoded[STATE_LENGTH];
+    memcpy(encoded, TIMER_CAPTURES[0], STATE_LENGTH);
+    RkrTimerFields fields{.clock_minutes = 0,
+                          .on_slot2 = (flags & 1) != 0,
+                          .off_slot2 = (flags & 2) != 0,
+                          .on_unknown_flag = (flags & 4) != 0,
+                          .off_unknown_flag = (flags & 8) != 0};
+    ASSERT_TRUE(encode_rkr_timers(fields, encoded));
+    EXPECT_EQ((encoded[25] >> 6) & 1, flags & 1);
+    EXPECT_EQ((encoded[25] >> 7) & 1, (flags >> 1) & 1);
+    EXPECT_EQ((encoded[19] >> 3) & 1, (flags >> 2) & 1);
+    EXPECT_EQ((encoded[20] >> 7) & 1, (flags >> 3) & 1);
+    fields.clock_minutes = 1440;
+    EXPECT_FALSE(encode_rkr_timers(fields, encoded));
   }
 }
 
