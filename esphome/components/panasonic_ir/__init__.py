@@ -9,6 +9,7 @@ from esphome.types import ConfigType
 from .climate import PanasonicIrClimate, panasonic_ir_ns
 
 DOMAIN = "panasonic_ir"
+MULTI_CONF = True
 DEPENDENCIES = ["climate.panasonic_ir", "time"]
 CONF_TIMERS_ID = "timers_id"
 CONF_TIMER = "timer"

@@ -83,6 +83,10 @@ void PanasonicIrClimate::send_cancel_all() {
 
 void RkrTimers::cancel_all() {
   this->climate_->send_cancel_all();
+  this->observe_cancel_all();
+}
+
+void RkrTimers::observe_cancel_all() {
   for (size_t i = 0; i < 4; ++i) {
     this->settings_.enabled[i] = false;
     this->refresh_(i);

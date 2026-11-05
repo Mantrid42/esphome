@@ -1,3 +1,4 @@
+#include "esphome/components/panasonic_ir/timer_datetime.h"
 #include "esphome/components/panasonic_ir/panasonic_rkr_timer_frame.h"
 #include <gtest/gtest.h>
 #include <cstdint>
@@ -984,6 +985,35 @@ TEST(PanasonicClimate, IautoButtonAlwaysEnables) {
     EXPECT_EQ(bytes[25], 0x80);
     EXPECT_EQ(f.climate.fan_mode.value(), climate::CLIMATE_FAN_AUTO);
   }
+}
+
+class TimerClock : public time::RealTimeClock {
+ public:
+  time_t timestamp_now() override { return 1767598198; }
+  void update() override {}
+};
+
+TEST(PanasonicTimers, NormalisesTimeAndImportsRemoteSetWithoutEcho) {
+  Fixture f(Model::RKR);
+  TimerClock clock;
+  RkrTimers timers(&f.climate, &clock);
+  f.climate.set_timer_controller(&timers);
+  timers.setup();
+  RkrTimerTime entity(&timers, TimerSlot::TIMER_SLOT_ON1);
+  entity.setup();
+  EXPECT_TRUE(f.transmitter.frames.empty());
+  entity.make_call().set_time(1, 29, 59).perform();
+  EXPECT_EQ(entity.hour, 1);
+  EXPECT_EQ(entity.minute, 20);
+  EXPECT_EQ(entity.second, 0);
+  auto sent = f.last_state();
+  EXPECT_EQ(decode_rkr_timers(sent.data()).on_minutes, 80);
+  const uint8_t remote[]{0x02, 0x20, 0xE0, 0x04, 0,    0,    0,    6, 0x02, 0x20, 0xE0, 0x04, 0,   0x6A,
+                         0x36, 0x80, 0xAF, 0x0D, 0x68, 0x89, 0xD7, 0, 0,    0x80, 0xDF, 2,    0x0B};
+  ASSERT_TRUE(f.receive(remote));
+  EXPECT_EQ(entity.hour, 6);
+  EXPECT_TRUE(timers.get_enabled(TimerSlot::TIMER_SLOT_ON1));
+  EXPECT_EQ(f.transmitter.frames.size(), 1u);
 }
 
 }  // namespace esphome::panasonic_ir::testing

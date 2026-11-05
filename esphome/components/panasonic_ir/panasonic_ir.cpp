@@ -284,6 +284,10 @@ bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
   if (!read_state(data, state, this->model_ == Model::RKR ? &short_command : nullptr))
     return false;
   if (short_command) {
+#ifdef USE_PANASONIC_RKR_TIMERS
+    if (this->timer_controller_ && state[13] == 0xB6 && state[14] == 0x32)
+      this->timer_controller_->observe_cancel_all();
+#endif
 #ifdef USE_SWITCH
     const uint16_t action = encode_uint16(state[13], state[14]);
     if (this->econavi_switch_ && (action == 0x68F2 || action == 0x5233))

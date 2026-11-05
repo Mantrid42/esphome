@@ -18,7 +18,7 @@ struct RkrTimerSettings {
   uint8_t enabled[4]{};
 };
 
-// This is desired HA state, never inferred from remote captures or an IR acknowledgement.
+// Stores requested settings and unambiguous updates received from a remote.
 class RkrTimers : public Component {
  public:
   RkrTimers(PanasonicIrClimate *climate, time::RealTimeClock *clock) : climate_(climate), clock_(clock) {}
@@ -30,6 +30,7 @@ class RkrTimers : public Component {
   void set_enabled(TimerSlot slot, bool enabled);
   bool apply(TimerSlot slot);
   void cancel_all();
+  void observe_cancel_all();
   void receive_timer(const RkrTimerFields &fields);
 #ifdef USE_DATETIME_TIME
   void register_time(TimerSlot slot, RkrTimerTime *entity) { this->times_[static_cast<size_t>(slot)] = entity; }
