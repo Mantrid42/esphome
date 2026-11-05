@@ -1,0 +1,63 @@
+time:
+  - platform: homeassistant
+    id: ha_clock
+    timezone: UTC
+
+panasonic_ir:
+  id: ha_timers
+  climate_id: panasonic_rkr_climate
+  time_id: ha_clock
+
+datetime:
+  - platform: panasonic_ir
+    id: ac_on1_time
+    timers_id: ha_timers
+    timer: ON1
+    name: "ON1 time"
+  - platform: panasonic_ir
+    id: ac_off1_time
+    timers_id: ha_timers
+    timer: OFF1
+    name: "OFF1 time"
+  - platform: panasonic_ir
+    id: ac_on2_time
+    timers_id: ha_timers
+    timer: ON2
+    name: "ON2 time"
+  - platform: panasonic_ir
+    id: ac_off2_time
+    timers_id: ha_timers
+    timer: OFF2
+    name: "OFF2 time"
+
+switch:
+  - platform: panasonic_ir
+    timers_id: ha_timers
+    timer: ON1
+    name: "ON1 enabled (requested)"
+  - platform: panasonic_ir
+    timers_id: ha_timers
+    timer: OFF1
+    name: "OFF1 enabled (requested)"
+  - platform: panasonic_ir
+    timers_id: ha_timers
+    timer: ON2
+    name: "ON2 enabled (requested)"
+  - platform: panasonic_ir
+    timers_id: ha_timers
+    timer: OFF2
+    name: "OFF2 enabled (requested)"
+
+button:
+  - platform: panasonic_ir
+    timers_id: ha_timers
+    cancel_all:
+      name: Cancel timers
+
+climate:
+  - platform: panasonic_ir
+    id: panasonic_rkr_climate
+    name: RKR Timer Test
+    model: RKR
+    transmitter_id: xmitr
+    receiver_id: rcvr

@@ -1,3 +1,4 @@
+#include "panasonic_rkr_timers.h"
 #include "panasonic_ir.h"
 
 #include <cmath>
@@ -109,7 +110,7 @@ uint8_t PanasonicIrClimate::fan_speed_() const {
   }
 }
 
-void PanasonicIrClimate::transmit_state() {
+void PanasonicIrClimate::build_state_(uint8_t *state) {
   // Frost protection is sent as the remote does, whatever else a call combined with the preset set, and the entity
   // shows what is sent
   const bool maintenance = this->mode != climate::CLIMATE_MODE_OFF &&
@@ -163,26 +164,36 @@ void PanasonicIrClimate::transmit_state() {
   params.fan_speed = this->fan_speed_();
   params.vane_v = this->vane_v_();
 
-  uint8_t state[STATE_LENGTH];
   encode_frame(params, state);
-  memcpy(this->echo_, state + SECTION1_LENGTH, SECTION2_LENGTH);
-  this->echo_sent_ms_ = millis();
+}
+
+void PanasonicIrClimate::transmit_state() {
+  uint8_t state[STATE_LENGTH];
+  this->build_state_(state);
+  this->send_state_(state, STATE_LENGTH);
+  this->sync_vane_select_();
+}
+
+void PanasonicIrClimate::send_state_(const uint8_t *state, size_t length) {
+  if (length == STATE_LENGTH) {
+    memcpy(this->echo_, state + SECTION1_LENGTH, SECTION2_LENGTH);
+    this->echo_sent_ms_ = millis();
+  }
 
   auto transmit = this->transmitter_->transmit();
   auto *data = transmit.get_data();
   data->set_carrier_frequency(CARRIER_FREQUENCY);
   // Two headers (mark + space) and footer marks, 16 timings per byte, and the gap
-  data->reserve(2 * 3 + STATE_LENGTH * 16 + 1);
+  data->reserve(2 * 3 + length * 16 + 1);
 
   data->item(HEADER_MARK, HEADER_SPACE);
   data->item_bytes<BIT_TIMINGS>(state, SECTION1_LENGTH);
   data->item(BIT_MARK, SECTION_GAP);
   data->item(HEADER_MARK, HEADER_SPACE);
-  data->item_bytes<BIT_TIMINGS>(state + SECTION1_LENGTH, SECTION2_LENGTH);
+  data->item_bytes<BIT_TIMINGS>(state + SECTION1_LENGTH, length - SECTION1_LENGTH);
   data->mark(BIT_MARK);
 
   transmit.perform();
-  this->sync_vane_select_();
 }
 
 bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
@@ -206,6 +217,10 @@ bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
     return true;
   }
 
+#ifdef USE_PANASONIC_RKR_TIMERS
+  if (this->timer_controller_ && state[23] == 0x80 && (state[13] & 8))
+    this->timer_controller_->receive_timer(decode_rkr_timers(state));
+#endif
   this->apply_received_(params);
   return true;
 }

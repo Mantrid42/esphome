@@ -14,6 +14,8 @@ static constexpr const char *FAN_MODE_MINIMUM = "Minimum";
 static constexpr const char *FAN_MODE_MAXIMUM = "Maximum";
 static constexpr const char *const CUSTOM_FAN_MODES[] PROGMEM = {FAN_MODE_MINIMUM, FAN_MODE_MAXIMUM};
 
+struct RkrTimerFields;
+class RkrTimers;
 class PanasonicIrClimate final : public climate_ir::ClimateIR {
  public:
   PanasonicIrClimate()
@@ -29,6 +31,11 @@ class PanasonicIrClimate final : public climate_ir::ClimateIR {
   }
 
   void set_model(Model model) { this->model_ = model; }
+#ifdef USE_PANASONIC_RKR_TIMERS
+  void set_timer_controller(RkrTimers *controller) { this->timer_controller_ = controller; }
+  bool send_timer_state(const RkrTimerFields &timers);
+  void send_cancel_all();
+#endif
   void setup() override;
   void dump_config() override;
 
@@ -51,6 +58,11 @@ class PanasonicIrClimate final : public climate_ir::ClimateIR {
   void sync_vane_select_();
   void apply_received_(const FrameParams &params);
 
+  void build_state_(uint8_t *state);
+  void send_state_(const uint8_t *state, size_t length);
+#ifdef USE_PANASONIC_RKR_TIMERS
+  RkrTimers *timer_controller_{nullptr};
+#endif
   Model model_{Model::JKE};
   // The remote has no concept of "off" mode, so remember what to send along with the power bit
   Mode last_mode_{Mode::AUTO};
