@@ -6,6 +6,7 @@ from tests.testing_helpers import ComponentManifestOverride
 def override_manifest(manifest: ComponentManifestOverride) -> None:
     manifest.auto_load = ["climate_ir", "climate", "time", "datetime", "switch"]
     manifest.dependencies = []
+    manifest.multi_conf = False
 
     async def to_code_testing(config: ConfigType) -> None:
         cg.add_define("USE_PANASONIC_RKR_TIMERS")
