@@ -96,6 +96,9 @@ void PanasonicIrClimate::sync_horizontal_vane_select_() {
 }
 
 void PanasonicIrClimate::control(const climate::ClimateCall &call) {
+  if (this->iauto_ && !call.get_mode().has_value() &&
+      (call.has_custom_fan_mode() || call.get_fan_mode().value_or(climate::CLIMATE_FAN_AUTO) != climate::CLIMATE_FAN_AUTO))
+    return;
   if (call.get_mode().has_value())
     this->iauto_ = false;
   // The base class only knows about the regular fan modes
@@ -197,8 +200,10 @@ void PanasonicIrClimate::build_state_(uint8_t *state) {
   encode_frame(params, state);
   if (this->model_ == Model::RKR) {
     this->iauto_ = this->iauto_ && this->mode == climate::CLIMATE_MODE_HEAT_COOL;
-    if (this->iauto_)
+    if (this->iauto_) {
+      this->iauto_temperature_ = params.temperature;
       state[25] |= 0x80;
+    }
     if (this->mode == climate::CLIMATE_MODE_COOL && this->mild_dry_)
       state[15] = 0x7F;
     state[13] &= ~0x08;  // Preserve hardware timers on operating commands.
@@ -252,7 +257,7 @@ void PanasonicIrClimate::enable_iauto() {
   this->iauto_ = true;
   this->mode = climate::CLIMATE_MODE_HEAT_COOL;
   this->preset = climate::CLIMATE_PRESET_NONE;
-  this->target_temperature = 25;
+  this->target_temperature = this->iauto_temperature_;
   this->set_fan_mode_(climate::CLIMATE_FAN_AUTO);
   this->transmit_state();
   this->publish_state();
@@ -320,6 +325,8 @@ bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
 #endif
   if (this->model_ == Model::RKR && state[23] == 0x89) {
     this->iauto_ = params.power && params.mode == Mode::AUTO && (state[25] & 0x80);
+    if (this->iauto_)
+      this->iauto_temperature_ = params.temperature;
     if (params.mode == Mode::COOL && (state[15] == 0x7F || state[15] == 0x80)) {
       this->mild_dry_ = state[15] == 0x7F;
 #ifdef USE_SWITCH
@@ -374,7 +381,7 @@ void PanasonicIrClimate::apply_received_(const FrameParams &params) {
   if (params.mode != Mode::FAN && !maintenance)
     this->target_temperature = params.temperature;
 
-  switch (params.fan_speed) {
+  switch (this->iauto_ && params.mode == Mode::AUTO ? FAN_SPEED_AUTO : params.fan_speed) {
     case FAN_SPEED_MIN:
       this->set_custom_fan_mode_(FAN_MODE_MINIMUM);
       break;

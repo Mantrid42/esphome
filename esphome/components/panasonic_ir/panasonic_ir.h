@@ -86,6 +86,7 @@ class PanasonicIrClimate final : public climate_ir::ClimateIR {
   void send_short_(uint8_t first, uint8_t second);
   bool mild_dry_{false};
   bool iauto_{false};
+  uint8_t iauto_temperature_{25};
   Model model_{Model::JKE};
   // The remote has no concept of "off" mode, so remember what to send along with the power bit
   Mode last_mode_{Mode::AUTO};
