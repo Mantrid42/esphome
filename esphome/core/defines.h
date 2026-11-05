@@ -40,7 +40,6 @@
 // logger
 #define ESPHOME_LOG_LEVEL ESPHOME_LOG_LEVEL_VERY_VERBOSE
 #define ESPHOME_LOGGER_TX_BUFFER_SIZE 512
-#define USE_PANASONIC_RKR_TIMERS
 #define USE_LOG_LISTENERS
 #define ESPHOME_LOG_MAX_LISTENERS 8
 #define USE_LOGGER_BOOT_LOG_BUFFER
@@ -321,6 +320,7 @@
 #define USE_PACKET_INTERFACE_HDLC
 #define USE_PACKET_INTERFACE_XXTEA
 #define USE_PCA9554_PCAL
+#define USE_PANASONIC_RKR_TIMERS
 #define USE_POWER_SUPPLY
 // Only defined by key-lookup preference backends; the slot-based platforms
 // (esp8266, rp2040) never set it in generated builds, and their preferences
