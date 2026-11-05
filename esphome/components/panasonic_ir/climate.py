@@ -27,6 +27,7 @@ def validate_rkr(config: ConfigType) -> None:
 
 
 MODELS = Model.options("DKE", "JKE", "LKE", "NKE", "CKP", "RKR", "PKE")
+CONF_VERTICAL_VANE_DEFAULT = "vertical_vane_default"
 
 # A frame is 440 pulses, so the receiver needs room for 220 symbols (a mark and a space each)
 FRAME_SYMBOLS = 220
@@ -35,6 +36,7 @@ RECOMMENDED_RMT_SYMBOLS = 256
 CONFIG_SCHEMA = climate_ir.climate_ir_with_receiver_schema(PanasonicIrClimate).extend(
     {
         cv.Optional(CONF_MODEL, default="JKE"): cv.enum(MODELS, upper=True),
+        cv.Optional(CONF_VERTICAL_VANE_DEFAULT): cv.int_range(min=1, max=5),
     }
 )
 
@@ -80,3 +82,6 @@ FINAL_VALIDATE_SCHEMA = _final_validate
 async def to_code(config: ConfigType) -> None:
     var = await climate_ir.new_climate_ir(config)
     cg.add(var.set_model(config[CONF_MODEL]))
+    cg.add_optional(
+        var.set_vertical_vane_default, config.get(CONF_VERTICAL_VANE_DEFAULT)
+    )

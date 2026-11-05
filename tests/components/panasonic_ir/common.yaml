@@ -4,10 +4,13 @@ climate:
     name: Panasonic Climate
     transmitter_id: xmitr
     receiver_id: rcvr
-    model: PKE
+    model: DKE
+    vertical_vane_default: 4
 
 select:
   - platform: panasonic_ir
     panasonic_ir_id: panasonic_climate
     vane_position:
       name: Panasonic Vane Position
+    horizontal_vane_position:
+      name: Panasonic Horizontal Vane Position

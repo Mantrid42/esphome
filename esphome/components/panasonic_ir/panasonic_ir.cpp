@@ -2,6 +2,7 @@
 #include "panasonic_ir.h"
 
 #include <cmath>
+#include <iterator>
 
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
@@ -22,6 +23,7 @@ void PanasonicIrClimate::setup() {
   // The restored mode is the best guess of whether the unit is on
   this->ckp_is_on_ = this->mode != climate::CLIMATE_MODE_OFF;
   this->sync_vane_select_();
+  this->sync_horizontal_vane_select_();
 }
 
 void PanasonicIrClimate::dump_config() {
@@ -48,6 +50,17 @@ void PanasonicIrClimate::set_vane_position(size_t index) {
   this->publish_state();
 }
 
+void PanasonicIrClimate::set_horizontal_vane_position(size_t index) {
+  if (!supports_horizontal_vane(this->model_) || index >= std::size(HORIZONTAL_VANE_POSITIONS)) {
+    ESP_LOGW(TAG, "Horizontal vane position %u unsupported", static_cast<unsigned>(index));
+    return;
+  }
+  this->preset = climate::CLIMATE_PRESET_NONE;
+  this->horizontal_vane_position_ = progmem_read_byte(&HORIZONTAL_VANE_POSITIONS[index]);
+  this->transmit_state();
+  this->publish_state();
+}
+
 uint8_t PanasonicIrClimate::vane_v_() const {
   if (this->swing_mode == climate::CLIMATE_SWING_VERTICAL)
     return VANE_V_AUTO;
@@ -65,6 +78,20 @@ void PanasonicIrClimate::sync_vane_select_() {
   const size_t index = vane == VANE_V_AUTO ? 0 : vane;
   if (this->vane_select_->active_index().value_or(SIZE_MAX) != index)
     this->vane_select_->publish_state(index);
+#endif
+}
+
+void PanasonicIrClimate::sync_horizontal_vane_select_() {
+#ifdef USE_SELECT
+  if (this->horizontal_vane_select_ == nullptr || !supports_horizontal_vane(this->model_))
+    return;
+  for (size_t index = 0; index < std::size(HORIZONTAL_VANE_POSITIONS); index++) {
+    if (this->horizontal_vane_position_ == progmem_read_byte(&HORIZONTAL_VANE_POSITIONS[index])) {
+      if (this->horizontal_vane_select_->active_index().value_or(SIZE_MAX) != index)
+        this->horizontal_vane_select_->publish_state(index);
+      break;
+    }
+  }
 #endif
 }
 
@@ -163,6 +190,7 @@ void PanasonicIrClimate::build_state_(uint8_t *state) {
                            : static_cast<uint8_t>(lroundf(clamp<float>(this->target_temperature, TEMP_MIN, TEMP_MAX)));
   params.fan_speed = this->fan_speed_();
   params.vane_v = this->vane_v_();
+  params.vane_h = this->horizontal_vane_position_;
 
   encode_frame(params, state);
   if (this->model_ == Model::RKR) {
@@ -181,6 +209,7 @@ void PanasonicIrClimate::transmit_state() {
   this->build_state_(state);
   this->send_state_(state, STATE_LENGTH);
   this->sync_vane_select_();
+  this->sync_horizontal_vane_select_();
 }
 
 void PanasonicIrClimate::send_state_(const uint8_t *state, size_t length) {
@@ -371,6 +400,9 @@ void PanasonicIrClimate::apply_received_(const FrameParams &params) {
     ESP_LOGV(TAG, "Ignoring vane value %u", params.vane_v);
   }
   this->sync_vane_select_();
+  if (supports_horizontal_vane(this->model_) && valid_horizontal_vane(params.vane_h))
+    this->horizontal_vane_position_ = params.vane_h;
+  this->sync_horizontal_vane_select_();
 
   this->publish_state();
 }

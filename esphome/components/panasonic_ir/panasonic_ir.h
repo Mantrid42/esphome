@@ -44,8 +44,13 @@ class PanasonicIrClimate final : public climate_ir::ClimateIR {
 
   /// Set the vertical vane from the select: 0 is auto (swing vertical), 1 (highest) to 5 (lowest) are fixed positions.
   void set_vane_position(size_t index);
+  /// Set the fixed vertical vane sent until the user selects another position, without transmitting at startup.
+  void set_vertical_vane_default(uint8_t position) { this->vane_position_ = position; }
+  /// Set the horizontal vane: 0 is auto, 1 far left, 2 left, 3 middle, 4 right, 5 far right.
+  void set_horizontal_vane_position(size_t index);
 #ifdef USE_SELECT
   SUB_SELECT(vane)
+  SUB_SELECT(horizontal_vane)
 #endif
 
   void enable_iauto();
@@ -69,6 +74,7 @@ class PanasonicIrClimate final : public climate_ir::ClimateIR {
   uint8_t fan_speed_() const;
   uint8_t vane_v_() const;
   void sync_vane_select_();
+  void sync_horizontal_vane_select_();
   void apply_received_(const FrameParams &params);
 
   void build_state_(uint8_t *state);
@@ -91,6 +97,7 @@ class PanasonicIrClimate final : public climate_ir::ClimateIR {
   // The fixed vane position (1 to 5) used while swing is off. 0 until one is chosen, then heat blows down and the
   // other modes up
   uint8_t vane_position_{0};
+  uint8_t horizontal_vane_position_{VANE_H_MIDDLE};
 };
 
 }  // namespace esphome::panasonic_ir
