@@ -174,6 +174,32 @@ static constexpr uint32_t SECTION_GAP = 10000;
 static constexpr remote_base::BitTimings BIT_TIMINGS{
     .bit_mark = BIT_MARK, .one_space = BIT_ONE_SPACE, .zero_space = BIT_ZERO_SPACE};
 
+static constexpr size_t SHORT_COMMAND_LENGTH = 16;
+inline void encode_short_command(const uint8_t (&command)[3], uint8_t (&frame)[SHORT_COMMAND_LENGTH]) {
+  memset(frame, 0, sizeof(frame));
+  frame[0] = frame[8] = 0x02;
+  frame[1] = frame[9] = 0x20;
+  frame[2] = frame[10] = 0xE0;
+  frame[3] = frame[11] = 0x04;
+  frame[7] = 0x06;
+  memcpy(frame + 12, command, sizeof(command));
+  frame[15] = calc_checksum(frame, SHORT_COMMAND_LENGTH);
+}
+
+/// Write either supported frame length to the transmitter buffer; does not start transmission.
+template<size_t N> inline void encode_waveform(remote_base::RemoteTransmitData &data, const uint8_t (&frame)[N]) {
+  static_assert(N == STATE_LENGTH || N == SHORT_COMMAND_LENGTH);
+  data.set_carrier_frequency(CARRIER_FREQUENCY);
+  // Two headers and footer marks, 16 timings per byte, and the section gap.
+  data.reserve(2 * 3 + N * 16 + 1);
+  data.item(HEADER_MARK, HEADER_SPACE);
+  data.item_bytes<BIT_TIMINGS>(frame, SECTION1_LENGTH);
+  data.item(BIT_MARK, SECTION_GAP);
+  data.item(HEADER_MARK, HEADER_SPACE);
+  data.item_bytes<BIT_TIMINGS>(frame + SECTION1_LENGTH, N - SECTION1_LENGTH);
+  data.mark(BIT_MARK);
+}
+
 /// A footer mark, followed by the end of the capture or a long space (idle time or section gap), never a bit.
 inline bool peek_footer(const remote_base::RemoteReceiveData &data) {
   return data.peek_mark(BIT_MARK) && (!data.is_valid(1) || data.peek_space_at_least(3 * BIT_ONE_SPACE, 1));
@@ -199,20 +225,24 @@ inline size_t receive_section(remote_base::RemoteReceiveData &data, uint8_t *byt
 /// The 10 ms gap between the sections is as long as the default idle time, so a capture holds the whole frame or
 /// one section. The first section is constant and outside the checksum, so a lone second section is enough and a
 /// lone first section is ignored.
-inline bool read_state(remote_base::RemoteReceiveData &data, uint8_t *state) {
+inline bool read_state(remote_base::RemoteReceiveData &data, uint8_t *state, bool *short_command = nullptr) {
   uint8_t section[SECTION2_LENGTH];
   size_t len = receive_section(data, section);
 
   uint8_t expected[STATE_LENGTH];
   fill_template(expected);
 
-  if (len == SECTION1_LENGTH) {
-    if (memcmp(section, expected, SECTION1_LENGTH) != 0)
-      return false;
+  if (len == SECTION1_LENGTH && memcmp(section, expected, SECTION1_LENGTH) == 0) {
     // The gap and the second section follow in a full capture. Anything else is just the receiver's idle space
     if (!data.is_valid(1) || !data.expect_space(SECTION_GAP))
       return false;
     len = receive_section(data, section);
+  }
+  if (short_command && len == SECTION1_LENGTH && memcmp(section, expected + SECTION1_LENGTH, 4) == 0 &&
+      section[4] == 0x80 && section[7] == sum_bytes(section, 7)) {
+    *short_command = true;
+    memcpy(state + SECTION1_LENGTH, section, len);
+    return true;
   }
   if (len != SECTION2_LENGTH)
     return false;

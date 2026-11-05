@@ -18,6 +18,14 @@ panasonic_ir_ns = cg.esphome_ns.namespace("panasonic_ir")
 PanasonicIrClimate = panasonic_ir_ns.class_("PanasonicIrClimate", climate_ir.ClimateIR)
 Model = panasonic_ir_ns.enum("Model", is_class=True)
 
+CONF_PANASONIC_IR_ID = "panasonic_ir_id"
+
+
+def validate_rkr(config: ConfigType) -> None:
+    if fv.get_declaring_config(config[CONF_PANASONIC_IR_ID])[CONF_MODEL] != "RKR":
+        raise cv.Invalid("This Panasonic feature requires model RKR")
+
+
 MODELS = Model.options("DKE", "JKE", "LKE", "NKE", "CKP", "RKR", "PKE")
 
 # A frame is 440 pulses, so the receiver needs room for 220 symbols (a mark and a space each)

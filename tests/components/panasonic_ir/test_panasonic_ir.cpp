@@ -883,6 +883,17 @@ TEST(PanasonicTimers, InvalidValuesDoNotModifyFrameAndFlagsAreIndependent) {
     EXPECT_EQ((encoded[20] >> 7) & 1, (flags >> 3) & 1);
     fields.clock_minutes = 1440;
     EXPECT_FALSE(encode_rkr_timers(fields, encoded));
+}
+
+TEST(PanasonicClimate, IautoButtonAlwaysEnables) {
+  Fixture f(Model::RKR);
+  for (int press = 0; press < 2; ++press) {
+    f.climate.enable_iauto();
+    auto bytes = f.last_state();
+    EXPECT_EQ(bytes[13], 1);
+    EXPECT_EQ(bytes[14], 50);
+    EXPECT_EQ(bytes[25], 0x80);
+    EXPECT_EQ(f.climate.fan_mode.value(), climate::CLIMATE_FAN_AUTO);
   }
 }
 

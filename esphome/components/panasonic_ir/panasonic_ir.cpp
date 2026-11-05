@@ -165,6 +165,15 @@ void PanasonicIrClimate::build_state_(uint8_t *state) {
   params.vane_v = this->vane_v_();
 
   encode_frame(params, state);
+  if (this->model_ == Model::RKR) {
+    this->iauto_ &= this->mode == climate::CLIMATE_MODE_HEAT_COOL;
+    if (this->iauto_)
+      state[25] |= 0x80;
+    if (this->mode == climate::CLIMATE_MODE_COOL && this->mild_dry_)
+      state[15] = 0x7F;
+    state[13] &= ~0x08;  // Preserve hardware timers on operating commands.
+    state[26] = calc_checksum(state, STATE_LENGTH);
+  }
 }
 
 void PanasonicIrClimate::transmit_state() {
@@ -196,10 +205,63 @@ void PanasonicIrClimate::send_state_(const uint8_t *state, size_t length) {
   transmit.perform();
 }
 
+void PanasonicIrClimate::send_short_(uint8_t first, uint8_t second) {
+  if (this->model_ != Model::RKR)
+    return;
+  uint8_t frame[SHORT_COMMAND_LENGTH];
+  encode_short_command({0x80, first, second}, frame);
+  auto transmit = this->transmitter_->transmit();
+  encode_waveform(*transmit.get_data(), frame);
+  transmit.perform();
+}
+
+void PanasonicIrClimate::enable_iauto() {
+  if (this->model_ != Model::RKR)
+    return;
+  this->iauto_ = true;
+  this->mode = climate::CLIMATE_MODE_HEAT_COOL;
+  this->preset = climate::CLIMATE_PRESET_NONE;
+  this->target_temperature = 25;
+  this->set_fan_mode_(climate::CLIMATE_FAN_AUTO);
+  this->transmit_state();
+  this->publish_state();
+}
+
+#ifdef USE_SWITCH
+void PanasonicIrClimate::set_mild_dry(bool enabled) {
+  if (this->model_ != Model::RKR || this->mode != climate::CLIMATE_MODE_COOL)
+    return;
+  this->mild_dry_ = enabled;
+  this->transmit_state();
+  if (this->mild_dry_switch_)
+    this->mild_dry_switch_->publish_state(enabled);
+  if (enabled && this->econavi_switch_)
+    this->econavi_switch_->publish_state(false);
+}
+
+void PanasonicIrClimate::set_econavi(bool enabled) {
+  if (this->model_ != Model::RKR || this->iauto_ || this->mode == climate::CLIMATE_MODE_FAN_ONLY ||
+      (this->mode == climate::CLIMATE_MODE_COOL && this->mild_dry_))
+    return;
+  this->send_short_(enabled ? 0x68 : 0x52, enabled ? 0xF2 : 0x33);
+  if (this->econavi_switch_)
+    this->econavi_switch_->publish_state(enabled);
+}
+#endif
+
 bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
   uint8_t state[STATE_LENGTH];
-  if (!read_state(data, state))
+  bool short_command = false;
+  if (!read_state(data, state, this->model_ == Model::RKR ? &short_command : nullptr))
     return false;
+  if (short_command) {
+#ifdef USE_SWITCH
+    const uint16_t action = encode_uint16(state[13], state[14]);
+    if (this->econavi_switch_ && (action == 0x68F2 || action == 0x5233))
+      this->econavi_switch_->publish_state(action == 0x68F2);
+#endif
+    return true;
+  }
 
   FrameParams params;
   params.model = this->model_;
@@ -221,6 +283,18 @@ bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
   if (this->timer_controller_ && state[23] == 0x80 && (state[13] & 8))
     this->timer_controller_->receive_timer(decode_rkr_timers(state));
 #endif
+  if (this->model_ == Model::RKR && state[23] == 0x89) {
+    this->iauto_ = params.power && params.mode == Mode::AUTO && (state[25] & 0x80);
+    if (params.mode == Mode::COOL && (state[15] == 0x7F || state[15] == 0x80)) {
+      this->mild_dry_ = state[15] == 0x7F;
+#ifdef USE_SWITCH
+      if (this->mild_dry_switch_)
+        this->mild_dry_switch_->publish_state(this->mild_dry_);
+      if (this->mild_dry_ && this->econavi_switch_)
+        this->econavi_switch_->publish_state(false);
+#endif
+    }
+  }
   this->apply_received_(params);
   return true;
 }

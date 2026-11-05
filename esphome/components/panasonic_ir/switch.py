@@ -10,7 +10,11 @@ from .climate import panasonic_ir_ns
 DEPENDENCIES = ["panasonic_ir"]
 RkrTimerSwitch = panasonic_ir_ns.class_("RkrTimerSwitch", switch.Switch, cg.Component)
 
-CONFIG_SCHEMA = (
+from .climate import CONF_PANASONIC_IR_ID, PanasonicIrClimate, validate_rkr
+
+DEPENDENCIES = ["climate.panasonic_ir"]
+
+TIMER_SCHEMA = (
     switch.switch_schema(
         RkrTimerSwitch, default_restore_mode="DISABLED", block_inverted=True
     )
@@ -33,7 +37,32 @@ CONFIG_SCHEMA = (
 )
 
 
+FEATURE_SCHEMA = cv.All(cv.Schema({
+    cv.GenerateID(CONF_PANASONIC_IR_ID): cv.use_id(PanasonicIrClimate),
+    cv.Optional("econavi"): switch.switch_schema(switch.ApplySwitch, default_restore_mode="DISABLED", block_inverted=True),
+    cv.Optional("mild_dry"): switch.switch_schema(switch.ApplySwitch, default_restore_mode="DISABLED", block_inverted=True),
+}), cv.has_at_least_one_key('econavi', 'mild_dry'))
+
+
+
+CONFIG_SCHEMA = cv.Any(TIMER_SCHEMA, FEATURE_SCHEMA)
+
+
+def final_validate(config: ConfigType) -> None:
+    if CONF_PANASONIC_IR_ID in config:
+        validate_rkr(config)
+
+
+FINAL_VALIDATE_SCHEMA = final_validate
+
+
 async def to_code(config: ConfigType) -> None:
+    if CONF_PANASONIC_IR_ID in config:
+        hub = await cg.get_variable(config[CONF_PANASONIC_IR_ID])
+        entities = switch.sub_switches(config, parent=hub)
+        await entities("econavi", hub.set_econavi_switch, apply="set_econavi(state)")
+        await entities("mild_dry", hub.set_mild_dry_switch, apply="set_mild_dry(state)")
+        return
     timers = await cg.get_variable(config[CONF_TIMERS_ID])
     var = await switch.new_switch(config, timers, config[CONF_TIMER])
     await cg.register_component(var, config)
