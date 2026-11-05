@@ -58,7 +58,9 @@ inline RkrTimerFields decode_rkr_timers(const uint8_t *frame) {
           .off_unknown_flag = (frame[20] & 0x80) != 0};
 }
 
-// Opposite-type selector stays at slot 1; enable + special time preserves its unknown state.
+// Individual SET and CANCEL use a full operating-state frame. A stale power, mode or fan setting can therefore
+// be replayed. Only CANCEL ALL has a verified independent short command. The opposite type uses slot 1 and
+// enable + 0x600 to preserve its unknown setting. Timer B25.b7 selects OFF2 in this command context.
 inline bool make_rkr_timer_operation(TimerSlot slot, uint16_t minutes, bool enabled, uint16_t clock_minutes,
                                      RkrTimerFields &fields) {
   if (!valid_timer_slot(slot) || !valid_timer_minutes(minutes) || clock_minutes >= 1440)
