@@ -17,12 +17,14 @@ struct RkrTimerSettings {
   uint16_t minutes[4]{360, 360, 1410, 1410};
   uint8_t enabled[4]{};
 };
+static_assert(sizeof(RkrTimerSettings) == 12);
 
 // Stores requested settings and unambiguous updates received from a remote.
 class RkrTimers : public Component {
  public:
   RkrTimers(PanasonicIrClimate *climate, time::RealTimeClock *clock) : climate_(climate), clock_(clock) {}
   void setup() override;
+  void dump_config() override;
   float get_setup_priority() const override { return setup_priority::DATA + 1; }
   uint16_t get_minutes(TimerSlot slot) const;
   bool get_enabled(TimerSlot slot) const;
@@ -43,6 +45,7 @@ class RkrTimers : public Component {
 #endif
  protected:
   void refresh_(size_t i);
+  void save_();
 #ifdef USE_DATETIME_TIME
   RkrTimerTime *times_[4]{};
 #endif

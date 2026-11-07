@@ -1,4 +1,5 @@
 #include "esphome/components/panasonic_ir/timer_datetime.h"
+#include "esphome/components/panasonic_ir/timer_switch.h"
 #include "esphome/components/panasonic_ir/panasonic_rkr_timer_frame.h"
 #include <gtest/gtest.h>
 #include <cstdint>
@@ -889,7 +890,8 @@ TEST(PanasonicTimers, InvalidValuesDoNotModifyFrameAndFlagsAreIndependent) {
 
 class TimerClock : public time::RealTimeClock {
  public:
-  time_t timestamp_now() override { return 1767598198; }
+  time_t timestamp{1767598198};
+  time_t timestamp_now() override { return this->timestamp; }
   void update() override {}
 };
 
@@ -928,6 +930,133 @@ TEST(PanasonicTimers, AtomicSlotWriteOverridesOnlyTransmittedPower) {
   EXPECT_EQ(f.last_state()[13] & 1, 0);
   EXPECT_EQ(f.climate.mode, climate::CLIMATE_MODE_COOL);
   EXPECT_EQ(timers.get_minutes(TimerSlot::TIMER_SLOT_OFF2), 840);
+}
+
+class TestTimers : public RkrTimers {
+ public:
+  using RkrTimers::RkrTimers;
+  void disable_preference() { this->preference_ = {}; }
+};
+
+TEST(PanasonicTimers, RejectedRequestsKeepIntentAndNativeSwitchState) {
+  Fixture f(Model::RKR);
+  TimerClock clock;
+  TestTimers timers(&f.climate, &clock);
+  timers.setup();
+  RkrTimerSwitch entity(&timers, TimerSlot::TIMER_SLOT_ON1);
+  entity.setup();
+  ASSERT_TRUE(timers.set_timer(TimerSlot::TIMER_SLOT_ON1, 420, true));
+  const auto count = f.transmitter.frames.size();
+  for (auto slot : {static_cast<TimerSlot>(4), static_cast<TimerSlot>(255)})
+    EXPECT_FALSE(timers.set_timer(slot, 420, false));
+  for (uint16_t minutes : {1, 359, 1440, 65535})
+    EXPECT_FALSE(timers.set_timer(TimerSlot::TIMER_SLOT_ON1, minutes, false));
+  clock.timestamp = 0;
+  entity.turn_off();
+  EXPECT_FALSE(timers.apply(TimerSlot::TIMER_SLOT_ON1));
+  EXPECT_EQ(timers.get_minutes(TimerSlot::TIMER_SLOT_ON1), 420);
+  EXPECT_TRUE(timers.get_enabled(TimerSlot::TIMER_SLOT_ON1));
+  EXPECT_TRUE(entity.state);
+  EXPECT_EQ(f.transmitter.frames.size(), count);
+  clock.timestamp = 1767598198;
+  entity.turn_off();
+  EXPECT_FALSE(entity.state);
+  EXPECT_EQ(f.transmitter.frames.size(), count + 1);
+}
+
+TEST(PanasonicTimers, RestoresValidatedSettingsWithoutTransmission) {
+  Fixture f(Model::RKR);
+  TimerClock clock;
+  auto preference = f.climate.make_entity_preference<RkrTimerSettings>(0x524B5202);
+  RkrTimerSettings saved{{0, 1430, 420, 840}, {1, 0, 1, 1}};
+  ASSERT_TRUE(preference.save(&saved));
+  RkrTimers timers(&f.climate, &clock);
+  timers.setup();
+  for (uint8_t i = 0; i < 4; i++) {
+    EXPECT_EQ(timers.get_minutes(static_cast<TimerSlot>(i)), saved.minutes[i]);
+    EXPECT_EQ(timers.get_enabled(static_cast<TimerSlot>(i)), saved.enabled[i]);
+  }
+  RkrTimerSwitch entity(&timers, TimerSlot::TIMER_SLOT_ON1);
+  entity.setup();
+  EXPECT_TRUE(entity.state);
+  EXPECT_TRUE(f.transmitter.frames.empty());
+  for (bool invalid_enabled : {false, true}) {
+    auto invalid = saved;
+    if (invalid_enabled)
+      invalid.enabled[3] = 2;
+    else
+      invalid.minutes[3] = 1440;
+    ASSERT_TRUE(preference.save(&invalid));
+    RkrTimers rejected(&f.climate, &clock);
+    rejected.setup();
+    EXPECT_EQ(rejected.get_minutes(TimerSlot::TIMER_SLOT_ON1), 360);
+    EXPECT_FALSE(rejected.get_enabled(TimerSlot::TIMER_SLOT_ON1));
+  }
+  EXPECT_TRUE(f.transmitter.frames.empty());
+}
+
+TEST(PanasonicTimers, StorageFailureDoesNotUndoTransmittedOperation) {
+  Fixture f(Model::RKR);
+  TimerClock clock;
+  TestTimers timers(&f.climate, &clock);
+  timers.setup();
+  timers.disable_preference();
+  ASSERT_TRUE(timers.set_timer(TimerSlot::TIMER_SLOT_OFF2, 840, true));
+  EXPECT_TRUE(timers.get_enabled(TimerSlot::TIMER_SLOT_OFF2));
+  EXPECT_EQ(timers.get_minutes(TimerSlot::TIMER_SLOT_OFF2), 840);
+  EXPECT_EQ(f.transmitter.frames.size(), 1u);
+  timers.cancel_all();
+  EXPECT_FALSE(timers.get_enabled(TimerSlot::TIMER_SLOT_OFF2));
+  EXPECT_EQ(f.transmitter.frames.size(), 2u);
+}
+
+TEST(PanasonicTimers, IndividualOperationsPreserveOtherRequestedSlotsAndCancelAllNeedsNoClock) {
+  Fixture f(Model::RKR);
+  TimerClock clock;
+  RkrTimers timers(&f.climate, &clock);
+  f.climate.set_timer_controller(&timers);
+  timers.setup();
+  for (uint8_t i = 0; i < 4; i++)
+    ASSERT_TRUE(timers.set_timer(static_cast<TimerSlot>(i), 360 + i * 60, true));
+  ASSERT_TRUE(timers.set_timer(TimerSlot::TIMER_SLOT_OFF2, 840, false));
+  EXPECT_EQ(f.transmitter.frames.size(), 5u);
+  auto sent = f.last_state();
+  auto fields = decode_rkr_timers(sent.data());
+  EXPECT_EQ(fields.on_minutes, TIMER_TIME_SPECIAL);
+  EXPECT_TRUE(fields.on_enabled);
+  EXPECT_TRUE(fields.off_slot2);
+  EXPECT_FALSE(fields.off_enabled);
+  for (uint8_t i = 0; i < 3; i++) {
+    EXPECT_TRUE(timers.get_enabled(static_cast<TimerSlot>(i)));
+    EXPECT_EQ(timers.get_minutes(static_cast<TimerSlot>(i)), 360 + i * 60);
+  }
+  clock.timestamp = 0;
+  timers.cancel_all();
+  EXPECT_EQ(f.transmitter.frames.size(), 6u);
+  EXPECT_EQ(f.transmitter.frames.back().size(), 263u);
+  for (uint8_t i = 0; i < 4; i++)
+    EXPECT_FALSE(timers.get_enabled(static_cast<TimerSlot>(i)));
+  // The same independent command received from the remote must not transmit a response.
+  ASSERT_TRUE(f.receive(f.transmitter.frames.back()));
+  EXPECT_EQ(f.transmitter.frames.size(), 6u);
+}
+
+TEST(PanasonicTimers, InvalidOperatingContextAndUnsupportedModelDoNotTransmit) {
+  Fixture f(Model::RKR);
+  TimerClock clock;
+  RkrTimers timers(&f.climate, &clock);
+  timers.setup();
+  uint8_t invalid[STATE_LENGTH]{};
+  EXPECT_FALSE(timers.set_timer(TimerSlot::TIMER_SLOT_ON1, 420, true, {}, &invalid));
+  RkrTimerFields fields;
+  ASSERT_TRUE(make_rkr_timer_operation(TimerSlot::TIMER_SLOT_ON1, 420, true, 600, fields));
+  fields.clock_minutes = 1440;
+  EXPECT_FALSE(f.climate.send_timer_state(fields));
+  f.climate.set_model(Model::DKE);
+  EXPECT_FALSE(timers.set_timer(TimerSlot::TIMER_SLOT_ON1, 420, true));
+  EXPECT_FALSE(timers.get_enabled(TimerSlot::TIMER_SLOT_ON1));
+  EXPECT_EQ(timers.get_minutes(TimerSlot::TIMER_SLOT_ON1), 360);
+  EXPECT_TRUE(f.transmitter.frames.empty());
 }
 
 }  // namespace esphome::panasonic_ir::testing

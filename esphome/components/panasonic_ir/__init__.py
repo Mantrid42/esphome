@@ -1,3 +1,4 @@
+from esphome import preferences
 import esphome.codegen as cg
 from esphome.components import time
 from esphome.components.const import CONF_CLIMATE_ID
@@ -41,3 +42,4 @@ async def to_code(config: ConfigType) -> None:
     cg.add(climate.set_timer_controller(var))
     await cg.register_component(var, config)
     cg.add_define("USE_PANASONIC_RKR_TIMERS")
+    preferences.reserve_preferences(1, 12)
