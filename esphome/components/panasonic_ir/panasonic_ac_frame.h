@@ -262,6 +262,7 @@ inline bool read_state(remote_base::RemoteReceiveData &data, uint8_t *state, boo
   if (short_command && len == SECTION1_LENGTH && memcmp(section, expected + SECTION1_LENGTH, 4) == 0 &&
       section[4] == 0x80 && section[7] == sum_bytes(section, 7)) {
     *short_command = true;
+    memcpy(state, expected, SECTION1_LENGTH);
     memcpy(state + SECTION1_LENGTH, section, len);
     return true;
   }
