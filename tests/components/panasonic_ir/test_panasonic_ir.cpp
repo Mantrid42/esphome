@@ -1284,6 +1284,26 @@ TEST(PanasonicFeatures, FanAndIautoRejectEconaviButKeepItsPreference) {
   f.mode(climate::CLIMATE_MODE_COOL);
   EXPECT_EQ(f.transmitter.frames.size(), count + 1);
 }
+
+TEST(PanasonicFeatures, DeferredPreferenceDoesNotOverwriteLastCommandedEconaviState) {
+  FeatureFixture f;
+  f.mode(climate::CLIMATE_MODE_COOL);
+  f.eco.turn_on();
+  f.mode(climate::CLIMATE_MODE_OFF);
+  const auto count = f.transmitter.frames.size();
+  f.dry.turn_on();
+  EXPECT_FALSE(f.eco.state);
+  EXPECT_TRUE(f.dry.state);
+  EXPECT_EQ(f.transmitter.frames.size(), count);
+  ASSERT_TRUE(f.receive_operating(Mode::HEAT, true));
+  EXPECT_TRUE(f.climate.is_econavi_active());
+  EXPECT_FALSE(f.climate.is_mild_dry_active());
+  EXPECT_EQ(f.transmitter.frames.size(), count);
+  f.command([](auto &call) { call.set_target_temperature(26); });
+  EXPECT_EQ(f.transmitter.frames.size(), count + 2);
+  f.expect_short(0x5233);
+  EXPECT_FALSE(f.climate.is_econavi_active());
+}
 #endif
 
 TEST(PanasonicTimers, AtomicSlotWriteOverridesOnlyTransmittedPower) {

@@ -289,7 +289,8 @@ bool PanasonicIrClimate::can_set_econavi() const {
 }
 
 bool PanasonicIrClimate::is_econavi_active() const {
-  return this->econavi_latched_ && this->mode != climate::CLIMATE_MODE_OFF && this->can_set_econavi();
+  return this->econavi_latched_ && this->mode != climate::CLIMATE_MODE_OFF &&
+         this->mode != climate::CLIMATE_MODE_FAN_ONLY && !this->iauto_ && !this->is_mild_dry_active();
 }
 
 void PanasonicIrClimate::sync_feature_switches_() {
