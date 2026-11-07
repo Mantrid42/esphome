@@ -173,10 +173,11 @@ void RkrTimers::receive_timer(const RkrTimerFields &fields) {
     return !apply ? LOG_STR("unchanged") : enabled ? LOG_STR("enabled") : LOG_STR("disabled");
   };
   const auto format_time = [](char (&out)[6], bool apply, uint16_t minutes) {
-    if (apply && minutes < 1440)
+    if (apply && minutes < 1440) {
       snprintf(out, sizeof(out), "%02u:%02u", minutes / 60, minutes % 60);
-    else
+    } else {
       memcpy(out, "--:--", sizeof(out));
+    }
   };
   char on_time[6], off_time[6];
   format_time(on_time, applied[0], fields.on_minutes);
