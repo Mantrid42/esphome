@@ -192,7 +192,7 @@ void PanasonicIrClimate::transmit_state() {
   }
   memcpy(this->echo_, state + SECTION1_LENGTH, SECTION2_LENGTH);
   this->echo_sent_ms_ = millis();
-  this->log_tx_(state, sizeof(state));
+  log_tx(state, sizeof(state));
 
   auto transmit = this->transmitter_->transmit();
   encode_waveform(*transmit.get_data(), state);
@@ -212,7 +212,7 @@ void PanasonicIrClimate::send_short_(uint8_t first, uint8_t second) {
   encode_short_command({0x80, first, second}, frame);
   this->short_echo_action_ = encode_uint16(first, second);
   this->short_echo_sent_ms_ = millis();
-  this->log_tx_(frame, sizeof(frame));
+  log_tx(frame, sizeof(frame));
   auto transmit = this->transmitter_->transmit();
   encode_waveform(*transmit.get_data(), frame);
   transmit.perform();
@@ -315,8 +315,8 @@ bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
     const uint16_t action = encode_uint16(state[13], state[14]);
     // Short echoes were already observed by the feature logic. Distinguish them in the logs.
     const bool echo = this->is_short_echo_(action);
-    this->log_short_command_(action, echo);
-    this->log_frame_(echo ? LOG_STR("ECHO") : LOG_STR("RX"), state, SHORT_COMMAND_LENGTH);
+    log_short_command(action, echo);
+    log_frame(echo ? LOG_STR("ECHO") : LOG_STR("RX"), state, SHORT_COMMAND_LENGTH);
     if (action == 0x5233) {
       this->cancel_econavi_();
     } else if (action == 0x68F2 && !this->mild_dry_) {
@@ -341,7 +341,7 @@ bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
   if (millis() - this->echo_sent_ms_ < ECHO_WINDOW_MS &&
       memcmp(state + SECTION1_LENGTH, this->echo_, SECTION2_LENGTH) == 0) {
     ESP_LOGD(TAG, "ECHO: ignoring our own operating frame");
-    this->log_frame_(LOG_STR("ECHO"), state, STATE_LENGTH);
+    log_frame(LOG_STR("ECHO"), state, STATE_LENGTH);
     this->echo_sent_ms_ -= ECHO_WINDOW_MS;  // only the first echo
     return true;
   }
@@ -359,8 +359,8 @@ bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
         this->cancel_econavi_();
     }
   }
-  this->log_command_(params, mild_dry, rkr_operating && this->iauto_);
-  this->log_frame_(LOG_STR("RX"), state, STATE_LENGTH);
+  log_command(params, mild_dry, rkr_operating && this->iauto_);
+  log_frame(LOG_STR("RX"), state, STATE_LENGTH);
   this->apply_received_(params);
   return true;
 }

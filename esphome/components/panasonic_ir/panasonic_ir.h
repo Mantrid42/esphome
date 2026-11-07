@@ -75,10 +75,10 @@ class PanasonicIrClimate final : public climate_ir::ClimateIR {
   void send_econavi_();
 
   void send_short_(uint8_t first, uint8_t second);
-  static void log_command_(const FrameParams &params, optional<bool> mild_dry, bool iauto);
-  static void log_short_command_(uint16_t action, bool echo);
-  static void log_frame_(const LogString *direction, const uint8_t *state, size_t length);
-  static void log_tx_(const uint8_t *state, size_t length);
+  static void log_command(const FrameParams &params, optional<bool> mild_dry, bool iauto);
+  static void log_short_command(uint16_t action, bool echo);
+  static void log_frame(const LogString *direction, const uint8_t *state, size_t length);
+  static void log_tx(const uint8_t *state, size_t length);
   bool is_short_echo_(uint16_t action);
   uint32_t short_echo_sent_ms_{UINT32_MAX / 2};
   uint16_t short_echo_action_{0};
