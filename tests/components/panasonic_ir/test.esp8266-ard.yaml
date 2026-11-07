@@ -3,3 +3,4 @@ packages:
   remote_receiver: !include ../../test_build_components/common/remote_receiver/esp8266-ard.yaml
   panasonic_ir: !include common.yaml
   rkr_timers: !include timers.yaml
+  rkr_features: !include features.yaml

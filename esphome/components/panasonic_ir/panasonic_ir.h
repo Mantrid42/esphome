@@ -57,6 +57,13 @@ class PanasonicIrClimate final : public climate_ir::ClimateIR {
   void enable_iauto();
   void send_powerful_quiet() { this->send_short_(0x9C, 0x32); }
   void send_nanoe_g() { this->send_short_(0x61, 0x33); }
+  bool get_econavi() const { return this->econavi_; }
+  bool get_mild_dry() const { return this->mild_dry_; }
+  bool can_set_econavi() const;
+  bool can_set_mild_dry() const;
+  /// Inferred from commands, not confirmed by feedback from the indoor unit.
+  bool is_econavi_active() const;
+  bool is_mild_dry_active() const { return this->mild_dry_ && this->mode == climate::CLIMATE_MODE_COOL; }
 #ifdef USE_SWITCH
   SUB_SWITCH(econavi)
   SUB_SWITCH(mild_dry)
@@ -77,6 +84,9 @@ class PanasonicIrClimate final : public climate_ir::ClimateIR {
   void sync_vane_select_();
   void sync_horizontal_vane_select_();
   void apply_received_(const FrameParams &params);
+  void sync_feature_switches_();
+  void cancel_econavi_();
+  void send_econavi_();
 
   void build_state_(uint8_t *state);
   void send_state_(const uint8_t *state, size_t length);
@@ -84,6 +94,10 @@ class PanasonicIrClimate final : public climate_ir::ClimateIR {
   RkrTimers *timer_controller_{nullptr};
 #endif
   void send_short_(uint8_t first, uint8_t second);
+  bool econavi_{false};
+  // The indoor unit retains this setting while powered off.
+  bool econavi_latched_{false};
+  bool econavi_pending_{false};
   bool mild_dry_{false};
   bool iauto_{false};
   uint8_t iauto_temperature_{25};

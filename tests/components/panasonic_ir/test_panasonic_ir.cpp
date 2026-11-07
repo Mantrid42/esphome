@@ -1029,6 +1029,7 @@ TEST(PanasonicClimate, RemoteMildDryClearsEconaviWithoutTransmitting) {
   ObservedSwitch dry;
   listener.climate.set_econavi_switch(&eco);
   listener.climate.set_mild_dry_switch(&dry);
+  remote.command([](auto &call) { call.set_mode(climate::CLIMATE_MODE_COOL); });
   remote.climate.set_econavi(true);
   ASSERT_TRUE(listener.receive(remote.transmitter.frames.back()));
   EXPECT_TRUE(eco.state);
@@ -1039,6 +1040,246 @@ TEST(PanasonicClimate, RemoteMildDryClearsEconaviWithoutTransmitting) {
   EXPECT_TRUE(dry.state);
   listener.climate.set_econavi(true);
   EXPECT_TRUE(listener.transmitter.frames.empty());
+}
+
+template<bool Econavi> class FeatureSwitch : public switch_::Switch {
+ public:
+  explicit FeatureSwitch(PanasonicIrClimate *parent) : parent_(parent) {
+    this->restore_mode = switch_::SWITCH_RESTORE_DISABLED;
+  }
+
+ protected:
+  void write_state(bool state) override {
+    if constexpr (Econavi)
+      this->parent_->set_econavi(state);
+    else
+      this->parent_->set_mild_dry(state);
+  }
+  PanasonicIrClimate *parent_;
+};
+
+struct FeatureFixture : Fixture {
+  FeatureSwitch<true> eco{&this->climate};
+  FeatureSwitch<false> dry{&this->climate};
+
+  FeatureFixture() : Fixture(Model::RKR) {
+    this->climate.set_econavi_switch(&this->eco);
+    this->climate.set_mild_dry_switch(&this->dry);
+    this->climate.setup();
+  }
+
+  void mode(climate::ClimateMode mode) {
+    this->command([mode](auto &call) { call.set_mode(mode); });
+  }
+
+  bool receive_operating(Mode mode, bool power, bool mild_dry = false, uint8_t horizontal = VANE_H_AUTO) {
+    uint8_t state[STATE_LENGTH];
+    encode_frame({.model = Model::RKR, .power = power, .mode = mode, .temperature = 23, .vane_h = horizontal}, state);
+    state[15] = mild_dry ? 0x7F : 0x80;
+    state[26] = calc_checksum(state, STATE_LENGTH);
+    return this->receive(state);
+  }
+
+  void expect_short(uint16_t command) const {
+    ASSERT_FALSE(this->transmitter.frames.empty());
+    uint8_t state[STATE_LENGTH]{};
+    bool is_short = false;
+    remote_base::RemoteReceiveData data(this->transmitter.frames.back(), TOLERANCE_PERCENT,
+                                        remote_base::TOLERANCE_MODE_PERCENTAGE);
+    ASSERT_TRUE(read_state(data, state, &is_short));
+    EXPECT_TRUE(is_short);
+    EXPECT_EQ(encode_uint16(state[13], state[14]), command);
+  }
+};
+
+TEST(PanasonicFeatures, StartupPublishesPreferencesWithoutTransmitting) {
+  FeatureFixture f;
+  EXPECT_TRUE(f.transmitter.frames.empty());
+  EXPECT_TRUE(f.eco.has_state());
+  EXPECT_TRUE(f.dry.has_state());
+  EXPECT_FALSE(f.eco.state);
+  EXPECT_FALSE(f.dry.state);
+  f.mode(climate::CLIMATE_MODE_COOL);
+  EXPECT_EQ(f.last_state()[17], VANE_H_AUTO);
+}
+
+TEST(PanasonicFeatures, MildDrySurvivesIncompatibleModesAndOff) {
+  FeatureFixture f;
+  f.mode(climate::CLIMATE_MODE_COOL);
+  f.dry.turn_on();
+  EXPECT_TRUE(f.climate.is_mild_dry_active());
+  EXPECT_EQ(f.last_state()[15], 0x7F);
+  for (auto mode : {climate::CLIMATE_MODE_HEAT, climate::CLIMATE_MODE_DRY, climate::CLIMATE_MODE_FAN_ONLY,
+                    climate::CLIMATE_MODE_HEAT_COOL, climate::CLIMATE_MODE_OFF}) {
+    f.mode(mode);
+    EXPECT_TRUE(f.dry.state);
+    EXPECT_TRUE(f.climate.get_mild_dry());
+    EXPECT_FALSE(f.climate.is_mild_dry_active());
+    EXPECT_EQ(f.last_state()[15], 0x80);
+  }
+  f.mode(climate::CLIMATE_MODE_COOL);
+  EXPECT_EQ(f.last_state()[15], 0x7F);
+  EXPECT_TRUE(f.climate.is_mild_dry_active());
+  f.mode(climate::CLIMATE_MODE_OFF);
+  EXPECT_EQ(f.last_state()[13] & 1, 0);
+  EXPECT_EQ(f.last_state()[13] & 0x70, 0x30);
+  EXPECT_EQ(f.last_state()[15], 0x7F);
+}
+
+TEST(PanasonicFeatures, OffEditsAreSilentAndLatestEconaviEditIsAppliedOnce) {
+  FeatureFixture f;
+  f.eco.turn_off();
+  f.eco.turn_on();
+  f.eco.turn_off();
+  f.eco.turn_on();
+  EXPECT_TRUE(f.transmitter.frames.empty());
+  EXPECT_TRUE(f.eco.state);
+  EXPECT_FALSE(f.climate.is_econavi_active());
+  f.mode(climate::CLIMATE_MODE_FAN_ONLY);
+  ASSERT_EQ(f.transmitter.frames.size(), 1u);
+  f.mode(climate::CLIMATE_MODE_COOL);
+  ASSERT_EQ(f.transmitter.frames.size(), 3u);
+  f.expect_short(0x68F2);
+  EXPECT_TRUE(f.climate.is_econavi_active());
+  for (auto mode : {climate::CLIMATE_MODE_HEAT, climate::CLIMATE_MODE_OFF, climate::CLIMATE_MODE_COOL}) {
+    const auto count = f.transmitter.frames.size();
+    f.mode(mode);
+    EXPECT_EQ(f.transmitter.frames.size(), count + 1);
+    EXPECT_TRUE(f.eco.state);
+  }
+  const auto count = f.transmitter.frames.size();
+  f.command([](auto &call) { call.set_target_temperature(24); });
+  EXPECT_EQ(f.transmitter.frames.size(), count + 1);
+}
+
+TEST(PanasonicFeatures, EconaviOffEditAndMildDryOffEditsAreDeferred) {
+  FeatureFixture f;
+  f.mode(climate::CLIMATE_MODE_COOL);
+  f.eco.turn_on();
+  f.mode(climate::CLIMATE_MODE_OFF);
+  const auto count = f.transmitter.frames.size();
+  f.eco.turn_off();
+  EXPECT_EQ(f.transmitter.frames.size(), count);
+  f.mode(climate::CLIMATE_MODE_COOL);
+  EXPECT_EQ(f.transmitter.frames.size(), count + 2);
+  f.expect_short(0x5233);
+  f.mode(climate::CLIMATE_MODE_OFF);
+  const auto off_count = f.transmitter.frames.size();
+  f.dry.turn_on();
+  f.dry.turn_off();
+  f.dry.turn_on();
+  EXPECT_EQ(f.transmitter.frames.size(), off_count);
+  f.mode(climate::CLIMATE_MODE_HEAT);
+  EXPECT_TRUE(f.dry.state);
+  EXPECT_EQ(f.last_state()[15], 0x80);
+  f.mode(climate::CLIMATE_MODE_COOL);
+  EXPECT_EQ(f.last_state()[15], 0x7F);
+}
+
+TEST(PanasonicFeatures, MutualExclusionAndRejectedOperationsKeepSwitchesConsistent) {
+  FeatureFixture f;
+  f.mode(climate::CLIMATE_MODE_COOL);
+  f.eco.turn_on();
+  const auto count = f.transmitter.frames.size();
+  f.dry.turn_on();
+  EXPECT_EQ(f.transmitter.frames.size(), count + 1);
+  EXPECT_FALSE(f.eco.state);
+  EXPECT_FALSE(f.climate.get_econavi());
+  EXPECT_FALSE(f.climate.is_econavi_active());
+  EXPECT_TRUE(f.dry.state);
+  f.eco.turn_on();
+  EXPECT_EQ(f.transmitter.frames.size(), count + 1);
+  EXPECT_FALSE(f.eco.state);
+  f.mode(climate::CLIMATE_MODE_HEAT);
+  const auto heat_count = f.transmitter.frames.size();
+  f.eco.turn_on();
+  f.dry.turn_on();
+  EXPECT_EQ(f.transmitter.frames.size(), heat_count);
+  EXPECT_FALSE(f.eco.state);
+  EXPECT_TRUE(f.dry.state);
+  // Disabling a suspended preference must remain possible through the native interface.
+  f.dry.turn_off();
+  EXPECT_FALSE(f.dry.state);
+  EXPECT_EQ(f.transmitter.frames.size(), heat_count);
+  f.mode(climate::CLIMATE_MODE_OFF);
+  f.eco.turn_on();
+  f.dry.turn_on();
+  f.eco.turn_on();
+  EXPECT_FALSE(f.eco.state);
+  EXPECT_TRUE(f.dry.state);
+}
+
+TEST(PanasonicFeatures, ReceivedMildDryOffFramesAreAuthoritativeAndPassive) {
+  FeatureFixture f;
+  ASSERT_TRUE(f.receive_operating(Mode::COOL, false, true));
+  EXPECT_EQ(f.climate.mode, climate::CLIMATE_MODE_OFF);
+  EXPECT_TRUE(f.dry.state);
+  ASSERT_TRUE(f.receive_operating(Mode::HEAT, true));
+  EXPECT_TRUE(f.dry.state);
+  ASSERT_TRUE(f.receive_operating(Mode::COOL, false, false));
+  EXPECT_EQ(f.climate.mode, climate::CLIMATE_MODE_OFF);
+  EXPECT_FALSE(f.dry.state);
+  EXPECT_TRUE(f.transmitter.frames.empty());
+}
+
+TEST(PanasonicFeatures, ManualVaneCancelsEconaviAndReturningToAutoDoesNotResumeIt) {
+  FeatureFixture f;
+  f.mode(climate::CLIMATE_MODE_COOL);
+  f.eco.turn_on();
+  f.expect_short(0x68F2);
+  auto count = f.transmitter.frames.size();
+  ASSERT_TRUE(f.receive_operating(Mode::COOL, true, false, VANE_H_MIDDLE));
+  EXPECT_FALSE(f.eco.state);
+  EXPECT_FALSE(f.climate.is_econavi_active());
+  ASSERT_TRUE(f.receive_operating(Mode::COOL, true));
+  EXPECT_FALSE(f.eco.state);
+  EXPECT_EQ(f.transmitter.frames.size(), count);
+  ASSERT_TRUE(f.receive_operating(Mode::COOL, true, false, VANE_H_MIDDLE));
+  f.eco.turn_on();
+  EXPECT_EQ(f.transmitter.frames.size(), ++count);
+  f.expect_short(0x68F2);
+  f.command([](auto &call) { call.set_target_temperature(26); });
+  EXPECT_EQ(f.last_state()[17], VANE_H_AUTO);
+  EXPECT_EQ(f.transmitter.frames.size(), count + 1);
+}
+
+TEST(PanasonicFeatures, RemoteEconaviCommandsArePassiveAndCancelPendingEdits) {
+  FeatureFixture f;
+  f.eco.turn_on();
+  uint8_t command[SHORT_COMMAND_LENGTH];
+  encode_short_command({0x80, 0x52, 0x33}, command);
+  remote_base::RemoteTransmitData data;
+  encode_waveform(data, command);
+  ASSERT_TRUE(f.receive(data.get_data()));
+  EXPECT_FALSE(f.eco.state);
+  encode_short_command({0x80, 0x68, 0xF2}, command);
+  data.reset();
+  encode_waveform(data, command);
+  ASSERT_TRUE(f.receive(data.get_data()));
+  EXPECT_TRUE(f.eco.state);
+  EXPECT_TRUE(f.transmitter.frames.empty());
+  f.mode(climate::CLIMATE_MODE_COOL);
+  EXPECT_EQ(f.transmitter.frames.size(), 1u);
+}
+
+TEST(PanasonicFeatures, FanAndIautoRejectEconaviButKeepItsPreference) {
+  FeatureFixture f;
+  f.mode(climate::CLIMATE_MODE_COOL);
+  f.eco.turn_on();
+  f.mode(climate::CLIMATE_MODE_FAN_ONLY);
+  auto count = f.transmitter.frames.size();
+  EXPECT_FALSE(f.climate.can_set_econavi());
+  f.eco.turn_on();
+  EXPECT_EQ(f.transmitter.frames.size(), count);
+  EXPECT_TRUE(f.eco.state);
+  f.climate.enable_iauto();
+  count = f.transmitter.frames.size();
+  EXPECT_FALSE(f.climate.can_set_econavi());
+  f.eco.turn_on();
+  EXPECT_EQ(f.transmitter.frames.size(), count);
+  EXPECT_TRUE(f.eco.state);
+  f.mode(climate::CLIMATE_MODE_COOL);
+  EXPECT_EQ(f.transmitter.frames.size(), count + 1);
 }
 #endif
 
