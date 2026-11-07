@@ -238,6 +238,9 @@ void PanasonicIrClimate::send_state_(const uint8_t *state, size_t length) {
     }
     memcpy(this->echo_, state + SECTION1_LENGTH, SECTION2_LENGTH);
     this->echo_sent_ms_ = millis();
+  } else {
+    this->short_echo_action_ = encode_uint16(state[13], state[14]);
+    this->short_echo_sent_ms_ = millis();
   }
   this->log_tx_(state, length);
 
@@ -262,12 +265,7 @@ void PanasonicIrClimate::send_short_(uint8_t first, uint8_t second) {
     return;
   uint8_t frame[SHORT_COMMAND_LENGTH];
   encode_short_command({0x80, first, second}, frame);
-  this->short_echo_action_ = encode_uint16(first, second);
-  this->short_echo_sent_ms_ = millis();
-  this->log_tx_(frame, sizeof(frame));
-  auto transmit = this->transmitter_->transmit();
-  encode_waveform(*transmit.get_data(), frame);
-  transmit.perform();
+  this->send_state_(frame, sizeof(frame));
 }
 
 void PanasonicIrClimate::enable_iauto() {
@@ -365,14 +363,22 @@ bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
   if (!read_state(data, state, this->model_ == Model::RKR ? &short_command : nullptr))
     return false;
   if (short_command) {
-#ifdef USE_PANASONIC_RKR_TIMERS
-    if (this->timer_controller_ && state[13] == 0xB6 && state[14] == 0x32)
-      this->timer_controller_->observe_cancel_all();
-#endif
     const uint16_t action = encode_uint16(state[13], state[14]);
-    // Short echoes were already observed by the feature logic. Distinguish them in the logs.
+    // Preserve the existing observation of short echoes, but identify them in the log.
     const bool echo = this->is_short_echo_(action);
-    this->log_short_command_(action, echo);
+#ifdef USE_PANASONIC_RKR_TIMERS
+    if (this->timer_controller_ && action == 0xB632) {
+      if (echo) {
+        ESP_LOGD(TAG, "ECHO: timer CANCEL ALL");
+      } else {
+        ESP_LOGD(TAG, "RX timer: CANCEL ALL (all slots disabled)");
+      }
+      this->timer_controller_->observe_cancel_all();
+    } else
+#endif
+    {
+      this->log_short_command_(action, echo);
+    }
     this->log_frame_(echo ? LOG_STR("ECHO") : LOG_STR("RX"), state, SHORT_COMMAND_LENGTH);
     if (action == 0x5233) {
       this->cancel_econavi_();
@@ -398,14 +404,15 @@ bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
   // the vane position derived from the mode as one the user chose.
   if (millis() - this->echo_sent_ms_ < ECHO_WINDOW_MS &&
       memcmp(state + SECTION1_LENGTH, this->echo_, SECTION2_LENGTH) == 0) {
-    ESP_LOGD(TAG, "ECHO: ignoring our own operating frame");
+    ESP_LOGD(TAG, "ECHO: ignoring our own full frame");
     this->log_frame_(LOG_STR("ECHO"), state, STATE_LENGTH);
     this->echo_sent_ms_ -= ECHO_WINDOW_MS;  // only the first echo
     return true;
   }
 
 #ifdef USE_PANASONIC_RKR_TIMERS
-  if (this->timer_controller_ && state[23] == 0x80 && (state[13] & 8))
+  const bool timer_command = this->timer_controller_ && state[23] == 0x80 && (state[13] & 8);
+  if (timer_command)
     this->timer_controller_->receive_timer(decode_rkr_timers(state));
 #endif
   optional<bool> mild_dry;
@@ -421,7 +428,10 @@ bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
         this->cancel_econavi_();
     }
   }
-  this->log_command_(params, mild_dry, rkr_operating && this->iauto_);
+#ifdef USE_PANASONIC_RKR_TIMERS
+  if (!timer_command)
+#endif
+    this->log_command_(params, mild_dry, rkr_operating && this->iauto_);
   this->log_frame_(LOG_STR("RX"), state, STATE_LENGTH);
   this->apply_received_(params);
   return true;

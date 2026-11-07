@@ -1402,6 +1402,83 @@ TEST(PanasonicClimate, IautoRemembersLocalAndRemoteTargets) {
   }
 }
 
+TEST(PanasonicTimerDiagnostics, LogsSetAndCancelWithoutSlotEntities) {
+  Fixture f(Model::RKR);
+  TimerClock clock;
+  RkrTimers timers(&f.climate, &clock);
+  timers.setup();
+  f.climate.set_timer_controller(&timers);
+  static constexpr auto SLOT = TimerSlot::TIMER_SLOT_OFF2;
+  uint8_t state[STATE_LENGTH];
+  encode_frame({.model = Model::RKR, .power = true, .mode = Mode::COOL}, state);
+  ReceiveLog log;
+  for (bool enabled : {true, false}) {
+    RkrTimerFields fields;
+    ASSERT_TRUE(make_rkr_timer_operation(SLOT, 510, enabled, 480, fields));
+    ASSERT_TRUE(encode_rkr_timers(fields, state));
+    log.lines.clear();
+    ASSERT_TRUE(f.receive(state));
+    ASSERT_TRUE(f.receive(state));
+    ASSERT_EQ(log.lines.size(), 2);
+    for (const auto &line : log.lines)
+      EXPECT_NE(line.find(enabled ? "OFF2 SET 08:30 (enabled)" : "OFF2 CANCEL 08:30 (disabled)"), std::string::npos);
+    EXPECT_EQ(timers.get_enabled(SLOT), enabled);
+    EXPECT_EQ(timers.get_minutes(SLOT), 510);
+  }
+  EXPECT_TRUE(f.transmitter.frames.empty());
+}
+
+TEST(PanasonicTimerDiagnostics, DistinguishesCancelAllEchoAndRemoteRepeat) {
+  Fixture f(Model::RKR);
+  TimerClock clock;
+  RkrTimers timers(&f.climate, &clock);
+  timers.setup();
+  f.climate.set_timer_controller(&timers);
+  ReceiveLog log;
+  timers.cancel_all();
+  ASSERT_EQ(f.transmitter.frames.size(), 1);
+  ASSERT_TRUE(f.receive(f.transmitter.frames.back()));
+  ASSERT_TRUE(f.receive(f.transmitter.frames.back()));
+  ASSERT_EQ(log.lines.size(), 3);
+  EXPECT_NE(log.lines[0].find("TX:"), std::string::npos);
+  EXPECT_NE(log.lines[1].find("ECHO: timer CANCEL ALL"), std::string::npos);
+  EXPECT_NE(log.lines[2].find("RX timer: CANCEL ALL"), std::string::npos);
+  EXPECT_EQ(f.transmitter.frames.size(), 1);
+}
+
+TEST(PanasonicTimerDiagnostics, FallsBackToOneSummaryWithoutTimerController) {
+  Fixture f(Model::RKR);
+  ReceiveLog log;
+  uint8_t state[STATE_LENGTH];
+  RkrTimerFields fields;
+  encode_frame({.model = Model::RKR, .power = true, .mode = Mode::COOL}, state);
+  ASSERT_TRUE(make_rkr_timer_operation(TimerSlot::TIMER_SLOT_ON1, 510, true, 480, fields));
+  ASSERT_TRUE(encode_rkr_timers(fields, state));
+  ASSERT_TRUE(f.receive(state));
+  ASSERT_EQ(log.lines.size(), 1);
+  EXPECT_NE(log.lines[0].find("RX: power=ON mode=COOL"), std::string::npos);
+  EXPECT_EQ(f.climate.mode, climate::CLIMATE_MODE_COOL);
+  EXPECT_TRUE(f.transmitter.frames.empty());
+}
+
+TEST(PanasonicTimerDiagnostics, FullTimerEchoHasNoRemoteSummary) {
+  Fixture f(Model::RKR);
+  TimerClock clock;
+  RkrTimers timers(&f.climate, &clock);
+  timers.setup();
+  f.climate.set_timer_controller(&timers);
+  ReceiveLog log;
+  ASSERT_TRUE(timers.set_timer(TimerSlot::TIMER_SLOT_ON1, 510, true));
+  ASSERT_EQ(f.transmitter.frames.size(), 1);
+  ASSERT_TRUE(f.receive(f.transmitter.frames.back()));
+  ASSERT_TRUE(f.receive(f.transmitter.frames.back()));
+  ASSERT_EQ(log.lines.size(), 3);
+  EXPECT_NE(log.lines[0].find("TX:"), std::string::npos);
+  EXPECT_NE(log.lines[1].find("ECHO:"), std::string::npos);
+  EXPECT_NE(log.lines[2].find("RX timers:"), std::string::npos);
+  EXPECT_EQ(f.transmitter.frames.size(), 1);
+}
+
 class TestTimers : public RkrTimers {
  public:
   using RkrTimers::RkrTimers;

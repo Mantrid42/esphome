@@ -31,6 +31,8 @@ static const LogString *short_command_name(uint16_t action) {
       return LOG_STR("NANOE-G button");
     case 0x9C32:
       return LOG_STR("POWERFUL/QUIET cycle");
+    case 0xB632:
+      return LOG_STR("timer CANCEL ALL (timer control not configured)");
     default:
       return LOG_STR("unknown short command");
   }
