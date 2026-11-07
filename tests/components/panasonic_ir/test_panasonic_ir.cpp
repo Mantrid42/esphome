@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <utility>
 #include <vector>
 
@@ -1446,5 +1447,88 @@ TEST(PanasonicTimers, InvalidOperatingContextAndUnsupportedModelDoNotTransmit) {
   EXPECT_EQ(timers.get_minutes(TimerSlot::TIMER_SLOT_ON1), 360);
   EXPECT_TRUE(f.transmitter.frames.empty());
 }
+
+#if defined(USE_SWITCH) && defined(USE_SELECT)
+class HorizontalVaneSelect : public select::Select {
+ public:
+  explicit HorizontalVaneSelect(PanasonicIrClimate *parent) : parent_(parent) {
+    static constexpr const char *const OPTIONS[]{"Auto", "Left", "Middle Left", "Middle", "Middle Right", "Right"};
+    this->traits.set_options_static(OPTIONS, std::size(OPTIONS));
+  }
+
+ protected:
+  void control(size_t index) override { this->parent_->set_horizontal_vane_position(index); }
+  PanasonicIrClimate *parent_;
+};
+
+TEST(PanasonicIntegration, ExplicitEconaviOnSynchronisesAutoWithoutSendingVaneFrame) {
+  FeatureFixture f;
+  HorizontalVaneSelect vane(&f.climate);
+  f.climate.set_horizontal_vane_select(&vane);
+  f.climate.setup();
+  EXPECT_EQ(vane.active_index().value(), 0u);
+  EXPECT_TRUE(f.transmitter.frames.empty());
+  f.mode(climate::CLIMATE_MODE_COOL);
+  vane.make_call().set_index(3).perform();
+  EXPECT_EQ(vane.active_index().value(), 3u);
+  auto count = f.transmitter.frames.size();
+  f.eco.turn_on();
+  EXPECT_EQ(f.transmitter.frames.size(), ++count);
+  f.expect_short(0x68F2);
+  EXPECT_EQ(vane.active_index().value(), 0u);
+  vane.make_call().set_index(5).perform();
+  EXPECT_EQ(f.transmitter.frames.size(), ++count);
+  EXPECT_FALSE(f.eco.state);
+  EXPECT_TRUE(f.climate.can_set_econavi());
+  vane.make_call().set_index(0).perform();
+  EXPECT_EQ(f.transmitter.frames.size(), ++count);
+  EXPECT_FALSE(f.eco.state);
+  f.mode(climate::CLIMATE_MODE_OFF);
+  f.eco.turn_on();
+  count = f.transmitter.frames.size();
+  vane.make_call().set_index(3).perform();
+  EXPECT_FALSE(f.eco.state);
+  f.mode(climate::CLIMATE_MODE_COOL);
+  EXPECT_EQ(f.transmitter.frames.size(), count + 2);
+}
+
+TEST(PanasonicIntegration, ReceivedEconaviOnSynchronisesSelectWithoutReply) {
+  FeatureFixture f;
+  HorizontalVaneSelect vane(&f.climate);
+  f.climate.set_horizontal_vane_select(&vane);
+  ASSERT_TRUE(f.receive_operating(Mode::COOL, true, false, VANE_H_MIDDLE));
+  EXPECT_EQ(vane.active_index().value(), 3u);
+  Fixture remote(Model::RKR);
+  remote.command([](auto &call) { call.set_mode(climate::CLIMATE_MODE_COOL); });
+  remote.climate.set_econavi(true);
+  ASSERT_TRUE(f.receive(remote.transmitter.frames.back()));
+  EXPECT_EQ(vane.active_index().value(), 0u);
+  EXPECT_TRUE(f.eco.state);
+  EXPECT_TRUE(f.transmitter.frames.empty());
+}
+
+TEST(PanasonicIntegration, TimerCommandsDoNotFlushDeferredFeatureEdits) {
+  FeatureFixture f;
+  TimerClock clock;
+  RkrTimers timers(&f.climate, &clock);
+  timers.setup();
+  f.eco.turn_on();
+  ASSERT_TRUE(timers.set_timer(TimerSlot::TIMER_SLOT_ON1, 420, true));
+  EXPECT_EQ(f.transmitter.frames.size(), 1u);
+  EXPECT_TRUE(f.eco.state);
+  EXPECT_FALSE(f.climate.is_econavi_active());
+  f.mode(climate::CLIMATE_MODE_COOL);
+  EXPECT_EQ(f.transmitter.frames.size(), 3u);
+  f.expect_short(0x68F2);
+  EXPECT_TRUE(f.climate.is_econavi_active());
+  ASSERT_TRUE(timers.set_timer(TimerSlot::TIMER_SLOT_OFF1, 840, true));
+  EXPECT_EQ(f.transmitter.frames.size(), 4u);
+  EXPECT_TRUE(f.eco.state);
+  EXPECT_TRUE(f.climate.is_econavi_active());
+  timers.cancel_all();
+  EXPECT_EQ(f.transmitter.frames.size(), 5u);
+  EXPECT_TRUE(f.eco.state);
+}
+#endif
 
 }  // namespace esphome::panasonic_ir::testing
