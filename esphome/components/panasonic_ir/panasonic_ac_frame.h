@@ -53,6 +53,13 @@ static constexpr uint8_t VANE_V_MIDDLE = 0x3;
 static constexpr uint8_t VANE_V_LOWEST = 0x5;
 static constexpr uint8_t VANE_V_AUTO = 0xF;
 
+static constexpr uint8_t VANE_H_MIDDLE = 0x6;
+static constexpr uint8_t VANE_H_AUTO = 0xD;
+
+inline bool valid_horizontal_vane(uint8_t position) {
+  return position == VANE_H_MIDDLE || (position >= 0x9 && position <= VANE_H_AUTO);
+}
+
 // The remote's frost protection ("+8/10 C Heat") is a mode of its own that only offers 8 C and 10 C. Both are
 // understood when receiving, 10 C is what we send.
 static constexpr uint8_t TEMP_MAINTENANCE = 10;
@@ -88,6 +95,7 @@ struct FrameParams {
   uint8_t temperature{25};
   uint8_t fan_speed{FAN_SPEED_AUTO};
   uint8_t vane_v{VANE_V_AUTO};
+  uint8_t vane_h{VANE_H_MIDDLE};
 };
 
 /// The part of the state that doesn't depend on the settings. Built in code, so it doesn't take up RAM on an ESP8266
@@ -119,6 +127,8 @@ inline void encode_frame(const FrameParams &p, uint8_t *state) {
   state[14] = (temp & 0x1F) << 1;
   state[16] = (p.vane_v & 0x0F) | (((p.fan_speed + FAN_SPEED_OFFSET) & 0x0F) << 4);
   state[17] = model.b17;
+  if (p.model == Model::RKR && valid_horizontal_vane(p.vane_h))
+    state[17] = p.vane_h;
   state[21] = model.b21_or;
   state[23] = model.b23;
   state[25] = model.b25;
@@ -160,6 +170,7 @@ inline bool decode_frame(const uint8_t *state, FrameParams &p) {
   p.temperature = temp;
   p.fan_speed = fan;
   p.vane_v = state[16] & 0x0F;
+  p.vane_h = state[17];
   return true;
 }
 

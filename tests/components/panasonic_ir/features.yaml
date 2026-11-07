@@ -1,0 +1,25 @@
+climate:
+  - platform: panasonic_ir
+    id: panasonic_features
+    name: Panasonic RKR Features
+    model: RKR
+    transmitter_id: xmitr
+    receiver_id: rcvr
+
+switch:
+  - platform: panasonic_ir
+    panasonic_ir_id: panasonic_features
+    econavi:
+      name: Panasonic ECONAVI
+    mild_dry:
+      name: Panasonic MILD DRY
+
+button:
+  - platform: panasonic_ir
+    panasonic_ir_id: panasonic_features
+    iauto_x:
+      name: Panasonic iAUTO-X
+    powerful_quiet:
+      name: Panasonic Powerful Quiet
+    nanoe_g:
+      name: Panasonic Nanoe-G

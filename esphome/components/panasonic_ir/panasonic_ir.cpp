@@ -20,7 +20,12 @@ void PanasonicIrClimate::setup() {
   climate_ir::ClimateIR::setup();
   // The restored mode is the best guess of whether the unit is on
   this->ckp_is_on_ = this->mode != climate::CLIMATE_MODE_OFF;
+#ifdef USE_SWITCH
+  if (this->econavi_switch_ != nullptr)
+    this->horizontal_vane_position_ = VANE_H_AUTO;
+#endif
   this->sync_vane_select_();
+  this->sync_feature_switches_();
 }
 
 void PanasonicIrClimate::dump_config() {
@@ -69,7 +74,8 @@ void PanasonicIrClimate::sync_vane_select_() {
 
 void PanasonicIrClimate::control(const climate::ClimateCall &call) {
   if (this->iauto_ && !call.get_mode().has_value() &&
-      (call.has_custom_fan_mode() || call.get_fan_mode().value_or(climate::CLIMATE_FAN_AUTO) != climate::CLIMATE_FAN_AUTO))
+      (call.has_custom_fan_mode() ||
+       call.get_fan_mode().value_or(climate::CLIMATE_FAN_AUTO) != climate::CLIMATE_FAN_AUTO))
     return;
   if (call.get_mode().has_value())
     this->iauto_ = false;
@@ -167,6 +173,7 @@ void PanasonicIrClimate::transmit_state() {
                            : static_cast<uint8_t>(lroundf(clamp<float>(this->target_temperature, TEMP_MIN, TEMP_MAX)));
   params.fan_speed = this->fan_speed_();
   params.vane_v = this->vane_v_();
+  params.vane_h = this->horizontal_vane_position_;
 
   uint8_t state[STATE_LENGTH];
   encode_frame(params, state);
@@ -176,8 +183,10 @@ void PanasonicIrClimate::transmit_state() {
       this->iauto_temperature_ = params.temperature;
       state[25] |= 0x80;
     }
-    if (this->mode == climate::CLIMATE_MODE_COOL && this->mild_dry_)
+    if (params.mode == Mode::COOL && this->mild_dry_)
       state[15] = 0x7F;
+    if (params.vane_h != VANE_H_AUTO || state[15] == 0x7F)
+      this->cancel_econavi_();
     state[13] &= ~0x08;  // Preserve hardware timers on operating commands.
     state[26] = calc_checksum(state, STATE_LENGTH);
   }
@@ -187,7 +196,12 @@ void PanasonicIrClimate::transmit_state() {
   auto transmit = this->transmitter_->transmit();
   encode_waveform(*transmit.get_data(), state);
   transmit.perform();
+  // Only an explicit edit made while off is deferred; ordinary commands never reassert ECONAVI.
+  if (this->econavi_pending_ && this->mode != climate::CLIMATE_MODE_OFF && !this->iauto_ &&
+      this->mode != climate::CLIMATE_MODE_FAN_ONLY)
+    this->send_econavi_();
   this->sync_vane_select_();
+  this->sync_feature_switches_();
 }
 
 void PanasonicIrClimate::send_short_(uint8_t first, uint8_t second) {
@@ -212,25 +226,71 @@ void PanasonicIrClimate::enable_iauto() {
   this->publish_state();
 }
 
+bool PanasonicIrClimate::can_set_mild_dry() const {
+  return this->model_ == Model::RKR &&
+         (this->mode == climate::CLIMATE_MODE_OFF || this->mode == climate::CLIMATE_MODE_COOL);
+}
+
+bool PanasonicIrClimate::can_set_econavi() const {
+  return this->model_ == Model::RKR && !this->mild_dry_ &&
+         (this->mode == climate::CLIMATE_MODE_OFF || (!this->iauto_ && this->mode != climate::CLIMATE_MODE_FAN_ONLY));
+}
+
+bool PanasonicIrClimate::is_econavi_active() const {
+  return this->econavi_latched_ && this->mode != climate::CLIMATE_MODE_OFF && this->can_set_econavi();
+}
+
+void PanasonicIrClimate::sync_feature_switches_() {
+#ifdef USE_SWITCH
+  PUBLISH_STATE(this->econavi_switch_, this->econavi_);
+  PUBLISH_STATE(this->mild_dry_switch_, this->mild_dry_);
+#endif
+}
+
+void PanasonicIrClimate::cancel_econavi_() {
+  this->econavi_ = false;
+  this->econavi_latched_ = false;
+  this->econavi_pending_ = false;
+}
+
+void PanasonicIrClimate::send_econavi_() {
+  this->econavi_pending_ = false;
+  this->econavi_latched_ = this->econavi_;
+  this->send_short_(this->econavi_ ? 0x68 : 0x52, this->econavi_ ? 0xF2 : 0x33);
+}
+
 #ifdef USE_SWITCH
 void PanasonicIrClimate::set_mild_dry(bool enabled) {
-  if (this->model_ != Model::RKR || this->mode != climate::CLIMATE_MODE_COOL)
+  if (this->model_ != Model::RKR || (enabled && !this->can_set_mild_dry())) {
+    this->sync_feature_switches_();
     return;
+  }
+  const bool changed = this->mild_dry_ != enabled;
   this->mild_dry_ = enabled;
-  this->transmit_state();
-  if (this->mild_dry_switch_)
-    this->mild_dry_switch_->publish_state(enabled);
-  if (enabled && this->econavi_switch_)
-    this->econavi_switch_->publish_state(false);
+  if (enabled) {
+    this->econavi_pending_ = this->econavi_pending_ || this->econavi_ || this->econavi_latched_;
+    this->econavi_ = false;
+  }
+  if (changed && this->mode == climate::CLIMATE_MODE_COOL)
+    this->transmit_state();
+  this->sync_feature_switches_();
 }
 
 void PanasonicIrClimate::set_econavi(bool enabled) {
-  if (this->model_ != Model::RKR || this->iauto_ || this->mode == climate::CLIMATE_MODE_FAN_ONLY ||
-      (this->mode == climate::CLIMATE_MODE_COOL && this->mild_dry_))
+  if (this->model_ != Model::RKR || (enabled && !this->can_set_econavi())) {
+    this->sync_feature_switches_();
     return;
-  this->send_short_(enabled ? 0x68 : 0x52, enabled ? 0xF2 : 0x33);
-  if (this->econavi_switch_)
-    this->econavi_switch_->publish_state(enabled);
+  }
+  const bool changed = this->econavi_ != enabled;
+  this->econavi_ = enabled;
+  if (enabled)
+    this->horizontal_vane_position_ = VANE_H_AUTO;
+  if (this->mode == climate::CLIMATE_MODE_OFF || this->iauto_ || this->mode == climate::CLIMATE_MODE_FAN_ONLY) {
+    this->econavi_pending_ = this->econavi_pending_ || changed;
+  } else {
+    this->send_econavi_();
+  }
+  this->sync_feature_switches_();
 }
 #endif
 
@@ -240,11 +300,16 @@ bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
   if (!read_state(data, state, this->model_ == Model::RKR ? &short_command : nullptr))
     return false;
   if (short_command) {
-#ifdef USE_SWITCH
     const uint16_t action = encode_uint16(state[13], state[14]);
-    if (this->econavi_switch_ && (action == 0x68F2 || action == 0x5233))
-      this->econavi_switch_->publish_state(action == 0x68F2);
-#endif
+    if (action == 0x5233) {
+      this->cancel_econavi_();
+    } else if (action == 0x68F2 && !this->mild_dry_) {
+      this->econavi_ = true;
+      this->econavi_latched_ = true;
+      this->econavi_pending_ = false;
+      this->horizontal_vane_position_ = VANE_H_AUTO;
+    }
+    this->sync_feature_switches_();
     return true;
   }
 
@@ -270,12 +335,8 @@ bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
       this->iauto_temperature_ = params.temperature;
     if (params.mode == Mode::COOL && (state[15] == 0x7F || state[15] == 0x80)) {
       this->mild_dry_ = state[15] == 0x7F;
-#ifdef USE_SWITCH
-      if (this->mild_dry_switch_)
-        this->mild_dry_switch_->publish_state(this->mild_dry_);
-      if (this->mild_dry_ && this->econavi_switch_)
-        this->econavi_switch_->publish_state(false);
-#endif
+      if (this->mild_dry_)
+        this->cancel_econavi_();
     }
   }
   this->apply_received_(params);
@@ -283,6 +344,11 @@ bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
 }
 
 void PanasonicIrClimate::apply_received_(const FrameParams &params) {
+  if (this->model_ == Model::RKR && valid_horizontal_vane(params.vane_h)) {
+    this->horizontal_vane_position_ = params.vane_h;
+    if (params.vane_h != VANE_H_AUTO)
+      this->cancel_econavi_();
+  }
   bool power = params.power;
   if (this->model_ == Model::CKP) {
     // The power bit is only a toggle
@@ -355,6 +421,7 @@ void PanasonicIrClimate::apply_received_(const FrameParams &params) {
   }
   this->sync_vane_select_();
 
+  this->sync_feature_switches_();
   this->publish_state();
 }
 
