@@ -8,6 +8,7 @@
 #include "esphome/components/remote_base/remote_base.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/preferences.h"
+#include "receive_log.h"
 
 namespace esphome::panasonic_ir::testing {
 
@@ -654,6 +655,66 @@ TEST(PanasonicClimate, ReceivesTheRemote) {
   EXPECT_FLOAT_EQ(f.climate.target_temperature, 25.0f);
   EXPECT_FALSE(f.climate.has_custom_fan_mode());
   EXPECT_EQ(f.climate.fan_mode, climate::CLIMATE_FAN_AUTO);
+}
+
+TEST(PanasonicDiagnostics, LogsRepeatedOperatingFramesWithoutFeatureEntities) {
+  Fixture f(Model::RKR);
+  uint8_t state[STATE_LENGTH];
+  encode_frame({.model = Model::RKR,
+                .power = false,
+                .mode = Mode::COOL,
+                .temperature = 23,
+                .fan_speed = FAN_SPEED_MEDIUM,
+                .vane_v = VANE_V_MIDDLE,
+                .vane_h = VANE_H_AUTO},
+               state);
+  state[15] = 0x7F;
+  state[26] = calc_checksum(state, sizeof(state));
+  ReceiveLog log;
+  ASSERT_TRUE(f.receive(state));
+  ASSERT_TRUE(f.receive(state));
+  ASSERT_EQ(log.lines.size(), 2);
+  for (const auto &line : log.lines)
+    EXPECT_NE(line.find("RX: power=OFF mode=COOL target=23 C fan=medium vane V=middle H=auto MILD DRY=ON"),
+              std::string::npos);
+  EXPECT_TRUE(f.climate.get_mild_dry());
+  EXPECT_EQ(f.climate.mode, climate::CLIMATE_MODE_OFF);
+  EXPECT_TRUE(f.transmitter.frames.empty());
+
+  log.lines.clear();
+  encode_frame({.model = Model::RKR, .power = true, .mode = Mode::AUTO}, state);
+  state[25] |= 0x80;
+  state[26] = calc_checksum(state, sizeof(state));
+  ASSERT_TRUE(f.receive(state));
+  ASSERT_EQ(log.lines.size(), 1);
+  EXPECT_NE(log.lines[0].find("iAUTO-X=ON"), std::string::npos);
+}
+
+TEST(PanasonicDiagnostics, LogsShortCommandsAndDistinguishesLocalEcho) {
+  Fixture f(Model::RKR);
+  ReceiveLog log;
+  remote_base::RemoteTransmitData signal;
+  uint8_t state[SHORT_COMMAND_LENGTH];
+  encode_short_command({0x80, 0x68, 0xF2}, state);
+  encode_waveform(signal, state);
+  ASSERT_TRUE(f.receive(signal.get_data()));
+  ASSERT_TRUE(f.receive(signal.get_data()));
+  ASSERT_EQ(log.lines.size(), 2);
+  EXPECT_NE(log.lines[0].find("RX: ECONAVI ON"), std::string::npos);
+  EXPECT_NE(log.lines[1].find("RX: ECONAVI ON"), std::string::npos);
+  EXPECT_TRUE(f.climate.get_econavi());
+  EXPECT_TRUE(f.transmitter.frames.empty());
+
+  log.lines.clear();
+  f.climate.send_nanoe_g();
+  ASSERT_EQ(f.transmitter.frames.size(), 1);
+  ASSERT_TRUE(f.receive(f.transmitter.frames.back()));
+  ASSERT_TRUE(f.receive(f.transmitter.frames.back()));
+  ASSERT_EQ(log.lines.size(), 3);
+  EXPECT_NE(log.lines[0].find("TX:"), std::string::npos);
+  EXPECT_NE(log.lines[1].find("ECHO: NANOE-G button"), std::string::npos);
+  EXPECT_NE(log.lines[2].find("RX: NANOE-G button"), std::string::npos);
+  EXPECT_EQ(f.transmitter.frames.size(), 1);
 }
 
 TEST(PanasonicClimate, ReceivesFrostProtectionWithoutLosingTheSetPoint) {
