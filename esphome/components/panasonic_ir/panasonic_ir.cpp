@@ -179,6 +179,12 @@ void PanasonicIrClimate::send_state_(const uint8_t *state, size_t length) {
     memcpy(this->echo_, state + SECTION1_LENGTH, SECTION2_LENGTH);
     this->echo_sent_ms_ = millis();
   }
+#ifdef USE_PANASONIC_RKR_TIMERS
+  else {
+    this->cancel_all_echo_sent_ms_ = millis();
+    ESP_LOGD(TAG, "TX: timer CANCEL ALL");
+  }
+#endif
 
   auto transmit = this->transmitter_->transmit();
   auto *data = transmit.get_data();
@@ -205,6 +211,12 @@ bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
   if (short_command) {
     if (state[13] != 0xB6 || state[14] != 0x32)
       return false;
+    if (millis() - this->cancel_all_echo_sent_ms_ < ECHO_WINDOW_MS) {
+      this->cancel_all_echo_sent_ms_ -= ECHO_WINDOW_MS;
+      ESP_LOGD(TAG, "ECHO: timer CANCEL ALL");
+    } else {
+      ESP_LOGD(TAG, "RX timer: CANCEL ALL (all slots disabled)");
+    }
     this->timer_controller_->observe_cancel_all();
     return true;
   }

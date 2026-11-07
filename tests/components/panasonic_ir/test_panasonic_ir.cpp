@@ -11,6 +11,7 @@
 #include "esphome/components/remote_base/remote_base.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/preferences.h"
+#include "receive_log.h"
 
 namespace esphome::panasonic_ir::testing {
 
@@ -930,6 +931,50 @@ TEST(PanasonicTimers, AtomicSlotWriteOverridesOnlyTransmittedPower) {
   EXPECT_EQ(f.last_state()[13] & 1, 0);
   EXPECT_EQ(f.climate.mode, climate::CLIMATE_MODE_COOL);
   EXPECT_EQ(timers.get_minutes(TimerSlot::TIMER_SLOT_OFF2), 840);
+}
+
+TEST(PanasonicTimerDiagnostics, LogsSetAndCancelWithoutSlotEntities) {
+  Fixture f(Model::RKR);
+  TimerClock clock;
+  RkrTimers timers(&f.climate, &clock);
+  timers.setup();
+  f.climate.set_timer_controller(&timers);
+  static constexpr auto SLOT = TimerSlot::TIMER_SLOT_OFF2;
+  uint8_t state[STATE_LENGTH];
+  encode_frame({.model = Model::RKR, .power = true, .mode = Mode::COOL}, state);
+  ReceiveLog log;
+  for (bool enabled : {true, false}) {
+    RkrTimerFields fields;
+    ASSERT_TRUE(make_rkr_timer_operation(SLOT, 510, enabled, 480, fields));
+    ASSERT_TRUE(encode_rkr_timers(fields, state));
+    log.lines.clear();
+    ASSERT_TRUE(f.receive(state));
+    ASSERT_TRUE(f.receive(state));
+    ASSERT_EQ(log.lines.size(), 2);
+    for (const auto &line : log.lines)
+      EXPECT_NE(line.find(enabled ? "OFF2 SET 08:30 (enabled)" : "OFF2 CANCEL 08:30 (disabled)"), std::string::npos);
+    EXPECT_EQ(timers.get_enabled(SLOT), enabled);
+    EXPECT_EQ(timers.get_minutes(SLOT), 510);
+  }
+  EXPECT_TRUE(f.transmitter.frames.empty());
+}
+
+TEST(PanasonicTimerDiagnostics, DistinguishesCancelAllEchoAndRemoteRepeat) {
+  Fixture f(Model::RKR);
+  TimerClock clock;
+  RkrTimers timers(&f.climate, &clock);
+  timers.setup();
+  f.climate.set_timer_controller(&timers);
+  ReceiveLog log;
+  timers.cancel_all();
+  ASSERT_EQ(f.transmitter.frames.size(), 1);
+  ASSERT_TRUE(f.receive(f.transmitter.frames.back()));
+  ASSERT_TRUE(f.receive(f.transmitter.frames.back()));
+  ASSERT_EQ(log.lines.size(), 3);
+  EXPECT_NE(log.lines[0].find("TX:"), std::string::npos);
+  EXPECT_NE(log.lines[1].find("ECHO: timer CANCEL ALL"), std::string::npos);
+  EXPECT_NE(log.lines[2].find("RX timer: CANCEL ALL"), std::string::npos);
+  EXPECT_EQ(f.transmitter.frames.size(), 1);
 }
 
 class TestTimers : public RkrTimers {

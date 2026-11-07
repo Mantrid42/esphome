@@ -142,9 +142,15 @@ void RkrTimers::refresh_(size_t i) {
 }
 
 void RkrTimers::receive_timer(const RkrTimerFields &fields) {
-  if (!valid_timer_field(fields.on_minutes) || !valid_timer_field(fields.off_minutes) || fields.clock_minutes >= 1440)
+  if (!valid_timer_field(fields.on_minutes) || !valid_timer_field(fields.off_minutes) || fields.clock_minutes >= 1440) {
+    ESP_LOGD(TAG, "RX timers: ignored invalid time fields (ON=%u, OFF=%u, clock=%u)", fields.on_minutes,
+             fields.off_minutes, fields.clock_minutes);
     return;
+  }
   const bool both_real = fields.on_minutes != TIMER_TIME_SPECIAL && fields.off_minutes != TIMER_TIME_SPECIAL;
+#ifdef ESPHOME_LOG_HAS_DEBUG
+  bool applied[2]{};
+#endif
   for (size_t type = 0; type < 2; ++type) {
     const auto minutes = type ? fields.off_minutes : fields.on_minutes;
     const bool enabled = type ? fields.off_enabled : fields.on_enabled;
@@ -155,7 +161,33 @@ void RkrTimers::receive_timer(const RkrTimerFields &fields) {
       this->settings_.minutes[i] = minutes;
     this->settings_.enabled[i] = enabled;
     this->refresh_(i);
+#ifdef ESPHOME_LOG_HAS_DEBUG
+    applied[type] = true;
+#endif
   }
+#ifdef ESPHOME_LOG_HAS_DEBUG
+  const auto operation = [](bool apply, bool enabled) -> const LogString * {
+    return !apply ? LOG_STR("KEEP") : enabled ? LOG_STR("SET") : LOG_STR("CANCEL");
+  };
+  const auto enable_state = [](bool apply, bool enabled) -> const LogString * {
+    return !apply ? LOG_STR("unchanged") : enabled ? LOG_STR("enabled") : LOG_STR("disabled");
+  };
+  const auto format_time = [](char (&out)[6], bool apply, uint16_t minutes) {
+    if (apply && minutes != TIMER_TIME_SPECIAL)
+      snprintf(out, sizeof(out), "%02u:%02u", minutes / 60, minutes % 60);
+    else
+      memcpy(out, "--:--", sizeof(out));
+  };
+  char on_time[6], off_time[6];
+  format_time(on_time, applied[0], fields.on_minutes);
+  format_time(off_time, applied[1], fields.off_minutes);
+  ESP_LOGD(TAG, "RX timers: ON%u %s %s (%s); OFF%u %s %s (%s)", 1U + fields.on_slot2,
+           LOG_STR_ARG(operation(applied[0], fields.on_enabled)), on_time,
+           LOG_STR_ARG(enable_state(applied[0], fields.on_enabled)), 1U + fields.off_slot2,
+           LOG_STR_ARG(operation(applied[1], fields.off_enabled)), off_time,
+           LOG_STR_ARG(enable_state(applied[1], fields.off_enabled)));
+#endif
+  ESP_LOGV(TAG, "RX timer clock: %02u:%02u", fields.clock_minutes / 60, fields.clock_minutes % 60);
   this->save_();
 }
 

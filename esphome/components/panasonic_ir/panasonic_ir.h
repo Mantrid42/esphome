@@ -63,6 +63,7 @@ class PanasonicIrClimate final : public climate_ir::ClimateIR {
   void send_state_(const uint8_t *state, size_t length);
 #ifdef USE_PANASONIC_RKR_TIMERS
   RkrTimers *timer_controller_{nullptr};
+  uint32_t cancel_all_echo_sent_ms_{UINT32_MAX / 2};
 #endif
   Model model_{Model::JKE};
   // The remote has no concept of "off" mode, so remember what to send along with the power bit
