@@ -39,7 +39,7 @@ static const LogString *short_command_name(uint16_t action) {
 }
 #endif
 
-void PanasonicIrClimate::log_command_(const FrameParams &params, optional<bool> mild_dry, bool iauto) {
+void PanasonicIrClimate::log_command(const FrameParams &params, optional<bool> mild_dry, bool iauto) {
 #ifdef ESPHOME_LOG_HAS_DEBUG
   ESP_LOGD(
       TAG, "RX: power%s=%s mode=%s target=%u C fan=%s vane V=%s H=%s%s%s",
@@ -56,20 +56,20 @@ void PanasonicIrClimate::log_command_(const FrameParams &params, optional<bool> 
 #endif
 }
 
-void PanasonicIrClimate::log_short_command_(uint16_t action, bool echo) {
+void PanasonicIrClimate::log_short_command(uint16_t action, bool echo) {
   ESP_LOGD(TAG, "%s: %s", echo ? LOG_STR_LITERAL("ECHO") : LOG_STR_LITERAL("RX"),
            LOG_STR_ARG(short_command_name(action)));
 }
 
-void PanasonicIrClimate::log_frame_(const LogString *direction, const uint8_t *state, size_t length) {
+void PanasonicIrClimate::log_frame(const LogString *direction, const uint8_t *state, size_t length) {
   ESP_LOGV_HEX(TAG, state, length, STATE_LENGTH, "%s %u bytes (checksums %02X/%02X, expected %02X/%02X): %s",
                LOG_STR_ARG(direction), static_cast<unsigned>(length), state[SECTION1_LENGTH - 1], state[length - 1],
                sum_bytes(state, SECTION1_LENGTH - 1), sum_bytes(state + SECTION1_LENGTH, length - SECTION1_LENGTH - 1));
 }
 
-void PanasonicIrClimate::log_tx_(const uint8_t *state, size_t length) {
+void PanasonicIrClimate::log_tx(const uint8_t *state, size_t length) {
   ESP_LOGD(TAG, "TX: %u-byte command", static_cast<unsigned>(length));
-  log_frame_(LOG_STR("TX"), state, length);
+  log_frame(LOG_STR("TX"), state, length);
 }
 
 }  // namespace esphome::panasonic_ir

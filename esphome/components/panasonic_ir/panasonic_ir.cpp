@@ -242,7 +242,7 @@ void PanasonicIrClimate::send_state_(const uint8_t *state, size_t length) {
     this->short_echo_action_ = encode_uint16(state[13], state[14]);
     this->short_echo_sent_ms_ = millis();
   }
-  this->log_tx_(state, length);
+  log_tx(state, length);
 
   auto transmit = this->transmitter_->transmit();
   auto *data = transmit.get_data();
@@ -377,9 +377,9 @@ bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
     } else
 #endif
     {
-      this->log_short_command_(action, echo);
+      log_short_command(action, echo);
     }
-    this->log_frame_(echo ? LOG_STR("ECHO") : LOG_STR("RX"), state, SHORT_COMMAND_LENGTH);
+    log_frame(echo ? LOG_STR("ECHO") : LOG_STR("RX"), state, SHORT_COMMAND_LENGTH);
     if (action == 0x5233) {
       this->cancel_econavi_();
     } else if (action == 0x68F2 && !this->mild_dry_) {
@@ -405,7 +405,7 @@ bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
   if (millis() - this->echo_sent_ms_ < ECHO_WINDOW_MS &&
       memcmp(state + SECTION1_LENGTH, this->echo_, SECTION2_LENGTH) == 0) {
     ESP_LOGD(TAG, "ECHO: ignoring our own full frame");
-    this->log_frame_(LOG_STR("ECHO"), state, STATE_LENGTH);
+    log_frame(LOG_STR("ECHO"), state, STATE_LENGTH);
     this->echo_sent_ms_ -= ECHO_WINDOW_MS;  // only the first echo
     return true;
   }
@@ -414,6 +414,8 @@ bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
   const bool timer_command = this->timer_controller_ && state[23] == 0x80 && (state[13] & 8);
   if (timer_command)
     this->timer_controller_->receive_timer(decode_rkr_timers(state));
+#else
+  constexpr bool timer_command = false;
 #endif
   optional<bool> mild_dry;
   const bool rkr_operating = this->model_ == Model::RKR && state[23] == 0x89;
@@ -428,11 +430,9 @@ bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
         this->cancel_econavi_();
     }
   }
-#ifdef USE_PANASONIC_RKR_TIMERS
   if (!timer_command)
-#endif
-    this->log_command_(params, mild_dry, rkr_operating && this->iauto_);
-  this->log_frame_(LOG_STR("RX"), state, STATE_LENGTH);
+    log_command(params, mild_dry, rkr_operating && this->iauto_);
+  log_frame(LOG_STR("RX"), state, STATE_LENGTH);
   this->apply_received_(params);
   return true;
 }
