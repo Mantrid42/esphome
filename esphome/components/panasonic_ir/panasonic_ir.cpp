@@ -20,10 +20,11 @@ static constexpr const char *PRESET_IAUTO_X = "iAUTO-X";
 static constexpr const char *const RKR_PRESETS[] PROGMEM = {PRESET_IAUTO_X};
 
 void PanasonicIrClimate::setup() {
-  if (this->model_ == Model::RKR && this->modes_.count(climate::CLIMATE_MODE_COOL))
+  if (this->model_ == Model::RKR && this->modes_.count(climate::CLIMATE_MODE_COOL)) {
     this->set_supported_custom_presets_static(RKR_PRESETS, std::size(RKR_PRESETS));
-  else
+  } else {
     this->set_supported_custom_presets_static(nullptr, 0);
+  }
   climate_ir::ClimateIR::setup();
   this->iauto_ = this->mode == climate::CLIMATE_MODE_COOL && this->get_custom_preset() == PRESET_IAUTO_X;
   if (this->iauto_) {
@@ -431,10 +432,11 @@ void PanasonicIrClimate::apply_received_(const FrameParams &params) {
 
   // The frost protection frame holds 8 C or 10 C, which is not a set-point of the normal range. Keep the one we had
   const bool maintenance = params.temperature < TEMP_MIN;
-  if (this->iauto_)
+  if (this->iauto_) {
     this->set_custom_preset_(PRESET_IAUTO_X);
-  else
+  } else {
     this->set_preset_(maintenance ? climate::CLIMATE_PRESET_AWAY : climate::CLIMATE_PRESET_NONE);
+  }
   // Fan only mode always sends a fixed temperature, so it says nothing about the set-point either
   if (params.mode != Mode::FAN && !maintenance)
     this->target_temperature = params.temperature;
