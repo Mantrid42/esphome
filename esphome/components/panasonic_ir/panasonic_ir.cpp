@@ -16,8 +16,21 @@ static constexpr uint32_t ECHO_WINDOW_MS = 1000;
 // In the order of the Model enum
 PROGMEM_STRING_TABLE(ModelStrings, "DKE", "JKE", "LKE", "NKE", "CKP", "RKR", "PKE");
 
+static constexpr const char *PRESET_IAUTO_X = "iAUTO-X";
+static constexpr const char *const RKR_PRESETS[] PROGMEM = {PRESET_IAUTO_X};
+
 void PanasonicIrClimate::setup() {
+  if (this->model_ == Model::RKR && this->modes_.count(climate::CLIMATE_MODE_COOL))
+    this->set_supported_custom_presets_static(RKR_PRESETS, std::size(RKR_PRESETS));
+  else
+    this->set_supported_custom_presets_static(nullptr, 0);
   climate_ir::ClimateIR::setup();
+  this->iauto_ = this->mode == climate::CLIMATE_MODE_COOL && this->get_custom_preset() == PRESET_IAUTO_X;
+  if (this->iauto_) {
+    this->iauto_temperature_ =
+        static_cast<uint8_t>(lroundf(clamp<float>(this->target_temperature, TEMP_MIN, TEMP_MAX)));
+    this->set_fan_mode_(climate::CLIMATE_FAN_AUTO);
+  }
   // The restored mode is the best guess of whether the unit is on
   this->ckp_is_on_ = this->mode != climate::CLIMATE_MODE_OFF;
 #ifdef USE_SWITCH
@@ -40,7 +53,8 @@ void PanasonicIrClimate::set_vane_position(size_t index) {
     return;
   }
   // A vane position takes the unit out of frost protection, as a swing change does
-  this->preset = climate::CLIMATE_PRESET_NONE;
+  if (this->preset == climate::CLIMATE_PRESET_AWAY)
+    this->set_preset_(climate::CLIMATE_PRESET_NONE);
   // The select only offers 0 to 5
   if (index == 0) {
     this->swing_mode = climate::CLIMATE_SWING_VERTICAL;
@@ -73,12 +87,29 @@ void PanasonicIrClimate::sync_vane_select_() {
 }
 
 void PanasonicIrClimate::control(const climate::ClimateCall &call) {
-  if (this->iauto_ && !call.get_mode().has_value() &&
-      (call.has_custom_fan_mode() ||
-       call.get_fan_mode().value_or(climate::CLIMATE_FAN_AUTO) != climate::CLIMATE_FAN_AUTO))
-    return;
-  if (call.get_mode().has_value())
+  const auto requested_mode = call.get_mode();
+  const bool enter_iauto = call.get_custom_preset() == PRESET_IAUTO_X &&
+                           (!requested_mode.has_value() || *requested_mode == climate::CLIMATE_MODE_COOL);
+  if (enter_iauto) {
+    this->iauto_ = true;
+    this->mode = climate::CLIMATE_MODE_COOL;
+    this->target_temperature = this->iauto_temperature_;
+    this->set_custom_preset_(PRESET_IAUTO_X);
+  } else if (this->iauto_ && (requested_mode.has_value() || call.get_preset().has_value())) {
     this->iauto_ = false;
+    this->set_preset_(climate::CLIMATE_PRESET_NONE);
+  }
+  if (this->iauto_) {
+    this->set_fan_mode_(climate::CLIMATE_FAN_AUTO);
+    if (!enter_iauto && !call.get_target_temperature().has_value() && !call.get_swing_mode().has_value()) {
+      this->publish_state();
+      return;
+    }
+    auto accepted = call;
+    accepted.set_fan_mode(climate::CLIMATE_FAN_AUTO);
+    climate_ir::ClimateIR::control(accepted);
+    return;
+  }
   // The base class only knows about the regular fan modes
   if (call.has_custom_fan_mode()) {
     this->set_custom_fan_mode_(call.get_custom_fan_mode());
@@ -143,7 +174,7 @@ void PanasonicIrClimate::transmit_state() {
       params.mode = Mode::DRY;
       break;
     case climate::CLIMATE_MODE_COOL:
-      params.mode = Mode::COOL;
+      params.mode = this->iauto_ ? Mode::AUTO : Mode::COOL;
       break;
     case climate::CLIMATE_MODE_HEAT:
       params.mode = Mode::HEAT;
@@ -178,7 +209,6 @@ void PanasonicIrClimate::transmit_state() {
   uint8_t state[STATE_LENGTH];
   encode_frame(params, state);
   if (this->model_ == Model::RKR) {
-    this->iauto_ = this->iauto_ && this->mode == climate::CLIMATE_MODE_HEAT_COOL;
     if (this->iauto_) {
       this->iauto_temperature_ = params.temperature;
       state[25] |= 0x80;
@@ -219,20 +249,13 @@ void PanasonicIrClimate::send_short_(uint8_t first, uint8_t second) {
 }
 
 void PanasonicIrClimate::enable_iauto() {
-  if (this->model_ != Model::RKR)
-    return;
-  this->iauto_ = true;
-  this->mode = climate::CLIMATE_MODE_HEAT_COOL;
-  this->preset = climate::CLIMATE_PRESET_NONE;
-  this->target_temperature = this->iauto_temperature_;
-  this->set_fan_mode_(climate::CLIMATE_FAN_AUTO);
-  this->transmit_state();
-  this->publish_state();
+  if (this->model_ == Model::RKR && this->modes_.count(climate::CLIMATE_MODE_COOL))
+    this->make_call().set_preset(PRESET_IAUTO_X).perform();
 }
 
 bool PanasonicIrClimate::can_set_mild_dry() const {
   return this->model_ == Model::RKR &&
-         (this->mode == climate::CLIMATE_MODE_OFF || this->mode == climate::CLIMATE_MODE_COOL);
+         (this->mode == climate::CLIMATE_MODE_OFF || (this->mode == climate::CLIMATE_MODE_COOL && !this->iauto_));
 }
 
 bool PanasonicIrClimate::can_set_econavi() const {
@@ -276,7 +299,7 @@ void PanasonicIrClimate::set_mild_dry(bool enabled) {
     this->econavi_pending_ = this->econavi_pending_ || this->econavi_ || this->econavi_latched_;
     this->econavi_ = false;
   }
-  if (changed && this->mode == climate::CLIMATE_MODE_COOL)
+  if (changed && this->mode == climate::CLIMATE_MODE_COOL && !this->iauto_)
     this->transmit_state();
   this->sync_feature_switches_();
 }
@@ -349,7 +372,8 @@ bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
   optional<bool> mild_dry;
   const bool rkr_operating = this->model_ == Model::RKR && state[23] == 0x89;
   if (rkr_operating) {
-    this->iauto_ = params.power && params.mode == Mode::AUTO && (state[25] & 0x80);
+    this->iauto_ = params.power && params.mode == Mode::AUTO && (state[25] & 0x80) &&
+                   this->modes_.count(climate::CLIMATE_MODE_COOL);
     if (this->iauto_)
       this->iauto_temperature_ = params.temperature;
     if (params.mode == Mode::COOL && (state[15] == 0x7F || state[15] == 0x80)) {
@@ -358,6 +382,8 @@ bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
       if (this->mild_dry_)
         this->cancel_econavi_();
     }
+  } else {
+    this->iauto_ = false;
   }
   log_command(params, mild_dry, rkr_operating && this->iauto_);
   log_frame(LOG_STR("RX"), state, STATE_LENGTH);
@@ -398,14 +424,17 @@ void PanasonicIrClimate::apply_received_(const FrameParams &params) {
         break;
       case Mode::AUTO:
       default:
-        this->mode = climate::CLIMATE_MODE_HEAT_COOL;
+        this->mode = this->iauto_ ? climate::CLIMATE_MODE_COOL : climate::CLIMATE_MODE_HEAT_COOL;
         break;
     }
   }
 
   // The frost protection frame holds 8 C or 10 C, which is not a set-point of the normal range. Keep the one we had
   const bool maintenance = params.temperature < TEMP_MIN;
-  this->preset = maintenance ? climate::CLIMATE_PRESET_AWAY : climate::CLIMATE_PRESET_NONE;
+  if (this->iauto_)
+    this->set_custom_preset_(PRESET_IAUTO_X);
+  else
+    this->set_preset_(maintenance ? climate::CLIMATE_PRESET_AWAY : climate::CLIMATE_PRESET_NONE);
   // Fan only mode always sends a fixed temperature, so it says nothing about the set-point either
   if (params.mode != Mode::FAN && !maintenance)
     this->target_temperature = params.temperature;

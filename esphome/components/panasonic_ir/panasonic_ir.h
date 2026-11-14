@@ -50,7 +50,9 @@ class PanasonicIrClimate final : public climate_ir::ClimateIR {
   bool can_set_mild_dry() const;
   /// Inferred from commands, not confirmed by feedback from the indoor unit.
   bool is_econavi_active() const;
-  bool is_mild_dry_active() const { return this->mild_dry_ && this->mode == climate::CLIMATE_MODE_COOL; }
+  bool is_mild_dry_active() const {
+    return this->mild_dry_ && this->mode == climate::CLIMATE_MODE_COOL && !this->iauto_;
+  }
 #ifdef USE_SWITCH
   SUB_SWITCH(econavi)
   SUB_SWITCH(mild_dry)

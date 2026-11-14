@@ -862,8 +862,71 @@ TEST(PanasonicClimate, IautoButtonAlwaysEnables) {
     EXPECT_EQ(bytes[13], 1);
     EXPECT_EQ(bytes[14], 50);
     EXPECT_EQ(bytes[25], 0x80);
+    EXPECT_EQ(f.climate.mode, climate::CLIMATE_MODE_COOL);
+    EXPECT_TRUE(f.climate.get_custom_preset() == "iAUTO-X");
     EXPECT_EQ(f.climate.fan_mode.value(), climate::CLIMATE_FAN_AUTO);
   }
+}
+
+TEST(PanasonicClimate, IautoPresetRejectsFanOnlyRequestsAndAppliesMixedChanges) {
+  Fixture f(Model::RKR);
+  f.command([](auto &call) { call.set_preset("iAUTO-X"); });
+  ASSERT_EQ(f.transmitter.frames.size(), 1);
+  EXPECT_EQ(f.climate.mode, climate::CLIMATE_MODE_COOL);
+  EXPECT_TRUE(f.climate.get_custom_preset() == "iAUTO-X");
+  unsigned publications = 0;
+  f.climate.add_on_state_callback([&](const auto &) { ++publications; });
+  f.command([](auto &call) { call.set_fan_mode("Maximum"); });
+  EXPECT_EQ(publications, 1);
+  EXPECT_EQ(f.transmitter.frames.size(), 1);
+  EXPECT_EQ(f.climate.fan_mode, climate::CLIMATE_FAN_AUTO);
+  f.command([](auto &call) {
+    call.set_fan_mode(climate::CLIMATE_FAN_HIGH);
+    call.set_target_temperature(23);
+    call.set_swing_mode(climate::CLIMATE_SWING_VERTICAL);
+  });
+  ASSERT_EQ(f.transmitter.frames.size(), 2);
+  EXPECT_EQ(f.last_state()[14], 46);
+  EXPECT_EQ(f.last_state()[16], 0xAF);
+  EXPECT_EQ(f.last_state()[25], 0x80);
+  f.command([](auto &call) {
+    call.set_preset(climate::CLIMATE_PRESET_NONE);
+    call.set_fan_mode("Maximum");
+  });
+  EXPECT_EQ(f.climate.mode, climate::CLIMATE_MODE_COOL);
+  EXPECT_EQ(f.climate.preset, climate::CLIMATE_PRESET_NONE);
+  EXPECT_TRUE(f.climate.get_custom_fan_mode() == "Maximum");
+  EXPECT_EQ(f.last_state()[13] >> 4, static_cast<uint8_t>(Mode::COOL));
+  EXPECT_EQ(f.last_state()[25] & 0x80, 0);
+  f.command([](auto &call) {
+    call.set_mode(climate::CLIMATE_MODE_OFF);
+    call.set_preset("iAUTO-X");
+  });
+  EXPECT_EQ(f.climate.mode, climate::CLIMATE_MODE_OFF);
+  EXPECT_FALSE(f.climate.has_custom_preset());
+}
+
+TEST(PanasonicClimate, IautoUnavailableWhenCoolingIsDisabled) {
+  Fixture f(Model::RKR);
+  f.climate.set_supports_cool(false);
+  f.climate.setup();
+  EXPECT_FALSE(f.climate.get_traits().supports_custom_preset("iAUTO-X"));
+  f.climate.enable_iauto();
+  EXPECT_TRUE(f.transmitter.frames.empty());
+}
+
+TEST(PanasonicClimate, NanoeGWhileOffSendsOnlyThePurificationCommand) {
+  Fixture f(Model::RKR);
+  f.climate.send_nanoe_g();
+  ASSERT_EQ(f.transmitter.frames.size(), 1);
+  uint8_t state[STATE_LENGTH];
+  bool short_command = false;
+  remote_base::RemoteReceiveData data(f.transmitter.frames.back(), TOLERANCE_PERCENT,
+                                      remote_base::TOLERANCE_MODE_PERCENTAGE);
+  ASSERT_TRUE(read_state(data, state, &short_command));
+  EXPECT_TRUE(short_command);
+  EXPECT_EQ(encode_uint16(state[13], state[14]), 0x6133);
+  EXPECT_EQ(f.climate.mode, climate::CLIMATE_MODE_OFF);
 }
 
 TEST(PanasonicClimate, IautoRemembersLocalAndRemoteTargets) {
@@ -872,6 +935,8 @@ TEST(PanasonicClimate, IautoRemembersLocalAndRemoteTargets) {
   remote.climate.enable_iauto();
   remote.command([](auto &call) { call.set_target_temperature(23); });
   ASSERT_TRUE(listener.receive(remote.transmitter.frames.back()));
+  EXPECT_EQ(listener.climate.mode, climate::CLIMATE_MODE_COOL);
+  EXPECT_TRUE(listener.climate.get_custom_preset() == "iAUTO-X");
   for (auto *fixture : {&remote, &listener}) {
     fixture->command([](auto &call) {
       call.set_mode(climate::CLIMATE_MODE_HEAT);
