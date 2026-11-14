@@ -33,7 +33,7 @@ class PanasonicIrClimate final : public climate_ir::ClimateIR {
     this->set_supported_custom_fan_modes_static(CUSTOM_FAN_MODES, std::size(CUSTOM_FAN_MODES));
   }
 
-  void set_model(Model model) { this->model_ = model; }
+  void set_model(Model model);
 #ifdef USE_PANASONIC_RKR_TIMERS
   void set_timer_controller(RkrTimers *controller) { this->timer_controller_ = controller; }
   bool send_timer_state(const RkrTimerFields &timers, optional<bool> power = {},
@@ -81,6 +81,11 @@ class PanasonicIrClimate final : public climate_ir::ClimateIR {
 
   uint8_t fan_speed_() const;
   uint8_t vane_v_() const;
+  uint8_t vane_h_() const;
+  bool vertical_swing_() const;
+  bool horizontal_swing_() const;
+  void set_swing_axes_(bool vertical, bool horizontal);
+  void apply_vane_change_();
   void sync_vane_select_();
   void sync_horizontal_vane_select_();
   void apply_received_(const FrameParams &params);

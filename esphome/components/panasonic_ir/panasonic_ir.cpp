@@ -18,13 +18,22 @@ static constexpr uint32_t ECHO_WINDOW_MS = 1000;
 // In the order of the Model enum
 PROGMEM_STRING_TABLE(ModelStrings, "DKE", "JKE", "LKE", "NKE", "CKP", "RKR", "PKE");
 
+void PanasonicIrClimate::set_model(Model model) {
+  this->model_ = model;
+  this->swing_modes_ = {climate::CLIMATE_SWING_OFF, climate::CLIMATE_SWING_VERTICAL};
+  if (supports_horizontal_vane(model)) {
+    this->swing_modes_.insert(climate::CLIMATE_SWING_HORIZONTAL);
+    this->swing_modes_.insert(climate::CLIMATE_SWING_BOTH);
+  }
+}
+
 void PanasonicIrClimate::setup() {
   climate_ir::ClimateIR::setup();
   // The restored mode is the best guess of whether the unit is on
   this->ckp_is_on_ = this->mode != climate::CLIMATE_MODE_OFF;
 #ifdef USE_SWITCH
   if (this->econavi_switch_ != nullptr)
-    this->horizontal_vane_position_ = VANE_H_AUTO;
+    this->set_swing_axes_(this->vertical_swing_(), true);
 #endif
   this->sync_vane_select_();
   this->sync_horizontal_vane_select_();
@@ -42,17 +51,10 @@ void PanasonicIrClimate::set_vane_position(size_t index) {
     ESP_LOGW(TAG, "Vane position %u out of range", static_cast<unsigned>(index));
     return;
   }
-  // A vane position takes the unit out of frost protection, as a swing change does
-  this->preset = climate::CLIMATE_PRESET_NONE;
-  // The select only offers 0 to 5
-  if (index == 0) {
-    this->swing_mode = climate::CLIMATE_SWING_VERTICAL;
-  } else {
+  if (index != 0)
     this->vane_position_ = index;
-    this->swing_mode = climate::CLIMATE_SWING_OFF;
-  }
-  this->transmit_state();
-  this->publish_state();
+  this->set_swing_axes_(index == 0, this->horizontal_swing_());
+  this->apply_vane_change_();
 }
 
 void PanasonicIrClimate::set_horizontal_vane_position(size_t index) {
@@ -60,19 +62,49 @@ void PanasonicIrClimate::set_horizontal_vane_position(size_t index) {
     ESP_LOGW(TAG, "Horizontal vane position %u unsupported", static_cast<unsigned>(index));
     return;
   }
-  this->preset = climate::CLIMATE_PRESET_NONE;
-  this->horizontal_vane_position_ = progmem_read_byte(&HORIZONTAL_VANE_POSITIONS[index]);
-  this->transmit_state();
+  if (index != 0)
+    this->horizontal_vane_position_ = progmem_read_byte(&HORIZONTAL_VANE_POSITIONS[index]);
+  this->set_swing_axes_(this->vertical_swing_(), index == 0);
+  this->apply_vane_change_();
+}
+
+void PanasonicIrClimate::apply_vane_change_() {
+  // Moving a vane leaves frost protection.
+  if (this->preset == climate::CLIMATE_PRESET_AWAY)
+    this->set_preset_(climate::CLIMATE_PRESET_NONE);
+  if (this->mode != climate::CLIMATE_MODE_OFF) {
+    this->transmit_state();
+  } else {
+    this->sync_vane_select_();
+    this->sync_horizontal_vane_select_();
+  }
   this->publish_state();
 }
 
+bool PanasonicIrClimate::vertical_swing_() const {
+  return this->swing_mode == climate::CLIMATE_SWING_VERTICAL || this->swing_mode == climate::CLIMATE_SWING_BOTH;
+}
+
+bool PanasonicIrClimate::horizontal_swing_() const {
+  return this->swing_mode == climate::CLIMATE_SWING_HORIZONTAL || this->swing_mode == climate::CLIMATE_SWING_BOTH;
+}
+
+void PanasonicIrClimate::set_swing_axes_(bool vertical, bool horizontal) {
+  this->swing_mode = vertical ? (horizontal ? climate::CLIMATE_SWING_BOTH : climate::CLIMATE_SWING_VERTICAL)
+                              : (horizontal ? climate::CLIMATE_SWING_HORIZONTAL : climate::CLIMATE_SWING_OFF);
+}
+
 uint8_t PanasonicIrClimate::vane_v_() const {
-  if (this->swing_mode == climate::CLIMATE_SWING_VERTICAL)
+  if (this->vertical_swing_())
     return VANE_V_AUTO;
   if (this->vane_position_ != 0)
     return this->vane_position_;
   // Blow down to heat from the bottom of the room, and up to cool from the top
   return this->mode == climate::CLIMATE_MODE_HEAT ? VANE_V_LOWEST : VANE_V_HIGHEST;
+}
+
+uint8_t PanasonicIrClimate::vane_h_() const {
+  return this->horizontal_swing_() ? VANE_H_AUTO : this->horizontal_vane_position_;
 }
 
 void PanasonicIrClimate::sync_vane_select_() {
@@ -91,7 +123,7 @@ void PanasonicIrClimate::sync_horizontal_vane_select_() {
   if (this->horizontal_vane_select_ == nullptr || !supports_horizontal_vane(this->model_))
     return;
   for (size_t index = 0; index < std::size(HORIZONTAL_VANE_POSITIONS); index++) {
-    if (this->horizontal_vane_position_ == progmem_read_byte(&HORIZONTAL_VANE_POSITIONS[index])) {
+    if (this->vane_h_() == progmem_read_byte(&HORIZONTAL_VANE_POSITIONS[index])) {
       if (this->horizontal_vane_select_->active_index().value_or(SIZE_MAX) != index)
         this->horizontal_vane_select_->publish_state(index);
       break;
@@ -101,6 +133,13 @@ void PanasonicIrClimate::sync_horizontal_vane_select_() {
 }
 
 void PanasonicIrClimate::control(const climate::ClimateCall &call) {
+  if (this->mode == climate::CLIMATE_MODE_OFF && call.get_swing_mode().has_value() && !call.get_mode().has_value() &&
+      !call.get_preset().has_value() && !call.has_custom_preset() && !call.get_target_temperature().has_value() &&
+      !call.get_fan_mode().has_value() && !call.has_custom_fan_mode()) {
+    this->swing_mode = *call.get_swing_mode();
+    this->apply_vane_change_();
+    return;
+  }
   if (this->iauto_ && !call.get_mode().has_value() &&
       (call.has_custom_fan_mode() ||
        call.get_fan_mode().value_or(climate::CLIMATE_FAN_AUTO) != climate::CLIMATE_FAN_AUTO))
@@ -156,7 +195,7 @@ void PanasonicIrClimate::build_state_(uint8_t *state) {
   if (maintenance) {
     this->mode = climate::CLIMATE_MODE_HEAT;
     this->set_custom_fan_mode_(FAN_MODE_MAXIMUM);
-    this->swing_mode = climate::CLIMATE_SWING_VERTICAL;
+    this->set_swing_axes_(true, this->horizontal_swing_());
   }
 
   FrameParams params;
@@ -201,7 +240,7 @@ void PanasonicIrClimate::build_state_(uint8_t *state) {
                            : static_cast<uint8_t>(lroundf(clamp<float>(this->target_temperature, TEMP_MIN, TEMP_MAX)));
   params.fan_speed = this->fan_speed_();
   params.vane_v = this->vane_v_();
-  params.vane_h = this->horizontal_vane_position_;
+  params.vane_h = this->vane_h_();
 
   encode_frame(params, state);
   if (this->model_ == Model::RKR) {
@@ -338,8 +377,9 @@ void PanasonicIrClimate::set_econavi(bool enabled) {
   }
   const bool changed = this->econavi_ != enabled;
   this->econavi_ = enabled;
-  if (enabled)
-    this->horizontal_vane_position_ = VANE_H_AUTO;
+  const bool swing_changed = enabled && !this->horizontal_swing_();
+  if (swing_changed)
+    this->set_swing_axes_(this->vertical_swing_(), true);
   this->sync_horizontal_vane_select_();
   if (this->mode == climate::CLIMATE_MODE_OFF || this->iauto_ || this->mode == climate::CLIMATE_MODE_FAN_ONLY) {
     this->econavi_pending_ = this->econavi_pending_ || changed;
@@ -347,6 +387,8 @@ void PanasonicIrClimate::set_econavi(bool enabled) {
     this->send_econavi_();
   }
   this->sync_feature_switches_();
+  if (swing_changed)
+    this->publish_state();
 }
 #endif
 
@@ -386,7 +428,8 @@ bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
       this->econavi_ = true;
       this->econavi_latched_ = true;
       this->econavi_pending_ = false;
-      this->horizontal_vane_position_ = VANE_H_AUTO;
+      this->set_swing_axes_(this->vertical_swing_(), true);
+      this->publish_state();
     }
     this->sync_horizontal_vane_select_();
     this->sync_feature_switches_();
@@ -438,11 +481,6 @@ bool PanasonicIrClimate::on_receive(remote_base::RemoteReceiveData data) {
 }
 
 void PanasonicIrClimate::apply_received_(const FrameParams &params) {
-  if (this->model_ == Model::RKR && valid_horizontal_vane(params.vane_h)) {
-    this->horizontal_vane_position_ = params.vane_h;
-    if (params.vane_h != VANE_H_AUTO)
-      this->cancel_econavi_();
-  }
   bool power = params.power;
   if (this->model_ == Model::CKP) {
     // The power bit is only a toggle
@@ -506,16 +544,22 @@ void PanasonicIrClimate::apply_received_(const FrameParams &params) {
 
   // Any other vane value is not one the remote sends, so it leaves the vane as it was
   if (params.vane_v == VANE_V_AUTO) {
-    this->swing_mode = climate::CLIMATE_SWING_VERTICAL;
+    this->set_swing_axes_(true, this->horizontal_swing_());
   } else if (params.vane_v >= VANE_V_HIGHEST && params.vane_v <= VANE_V_LOWEST) {
-    this->swing_mode = climate::CLIMATE_SWING_OFF;
+    this->set_swing_axes_(false, this->horizontal_swing_());
     this->vane_position_ = params.vane_v;
   } else {
     ESP_LOGV(TAG, "Ignoring vane value %u", params.vane_v);
   }
   this->sync_vane_select_();
-  if (supports_horizontal_vane(this->model_) && valid_horizontal_vane(params.vane_h))
-    this->horizontal_vane_position_ = params.vane_h;
+  if (supports_horizontal_vane(this->model_) && valid_horizontal_vane(params.vane_h)) {
+    if (params.vane_h != VANE_H_AUTO) {
+      this->horizontal_vane_position_ = params.vane_h;
+      if (this->model_ == Model::RKR)
+        this->cancel_econavi_();
+    }
+    this->set_swing_axes_(this->vertical_swing_(), params.vane_h == VANE_H_AUTO);
+  }
   this->sync_horizontal_vane_select_();
 
   this->sync_feature_switches_();
