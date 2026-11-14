@@ -814,8 +814,46 @@ TEST(PanasonicClimate, HorizontalVaneTracksRemoteCommands) {
   EXPECT_EQ(f.last_state()[17], VANE_H_LEFT);
 }
 
+TEST(PanasonicClimate, OffVaneEditsAreSilentAndBothAxesRememberTheirPositions) {
+  for (auto model : {Model::DKE, Model::RKR}) {
+    Fixture f(model);
+    const auto traits = f.climate.get_traits();
+    EXPECT_TRUE(traits.supports_swing_mode(climate::CLIMATE_SWING_HORIZONTAL));
+    EXPECT_TRUE(traits.supports_swing_mode(climate::CLIMATE_SWING_BOTH));
+    f.climate.set_vane_position(3);
+    f.climate.set_horizontal_vane_position(1);
+    f.command([](auto &call) { call.set_swing_mode(climate::CLIMATE_SWING_BOTH); });
+    EXPECT_TRUE(f.transmitter.frames.empty());
+    EXPECT_EQ(f.climate.mode, climate::CLIMATE_MODE_OFF);
+    EXPECT_EQ(f.climate.swing_mode, climate::CLIMATE_SWING_BOTH);
+    f.command([](auto &call) { call.set_mode(climate::CLIMATE_MODE_COOL); });
+    ASSERT_EQ(f.transmitter.frames.size(), 1);
+    EXPECT_EQ(f.last_state()[16] & 0x0F, VANE_V_AUTO);
+    EXPECT_EQ(f.last_state()[17], VANE_H_AUTO);
+    f.climate.set_vane_position(3);
+    EXPECT_EQ(f.climate.swing_mode, climate::CLIMATE_SWING_HORIZONTAL);
+    f.command([](auto &call) { call.set_swing_mode(climate::CLIMATE_SWING_OFF); });
+    EXPECT_EQ(f.last_state()[16] & 0x0F, 3);
+    EXPECT_EQ(f.last_state()[17], VANE_H_FULL_LEFT);
+  }
+}
+
+TEST(PanasonicClimate, RemoteSwingUpdatesBothAxesWithoutTransmitting) {
+  Fixture f(Model::RKR);
+  uint8_t state[STATE_LENGTH];
+  encode_frame({.model = Model::RKR, .power = true, .mode = Mode::COOL, .vane_h = VANE_H_AUTO}, state);
+  ASSERT_TRUE(f.receive(state));
+  EXPECT_EQ(f.climate.swing_mode, climate::CLIMATE_SWING_BOTH);
+  encode_frame({.model = Model::RKR, .power = true, .mode = Mode::COOL, .vane_v = 2, .vane_h = VANE_H_AUTO}, state);
+  ASSERT_TRUE(f.receive(state));
+  EXPECT_EQ(f.climate.swing_mode, climate::CLIMATE_SWING_HORIZONTAL);
+  EXPECT_TRUE(f.transmitter.frames.empty());
+}
+
 TEST(PanasonicClimate, UnsupportedModelIgnoresHorizontalVaneChanges) {
   Fixture f(Model::PKE);
+  EXPECT_FALSE(f.climate.get_traits().supports_swing_mode(climate::CLIMATE_SWING_HORIZONTAL));
+  EXPECT_FALSE(f.climate.get_traits().supports_swing_mode(climate::CLIMATE_SWING_BOTH));
   f.command([](auto &call) { call.set_mode(climate::CLIMATE_MODE_COOL); });
   const size_t sent = f.transmitter.frames.size();
   f.climate.set_horizontal_vane_position(1);
