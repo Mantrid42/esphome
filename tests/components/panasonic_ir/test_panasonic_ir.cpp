@@ -1084,6 +1084,8 @@ TEST(PanasonicClimate, IautoButtonAlwaysEnables) {
     EXPECT_EQ(bytes[13], 1);
     EXPECT_EQ(bytes[14], 50);
     EXPECT_EQ(bytes[25], 0x80);
+    EXPECT_EQ(f.climate.mode, climate::CLIMATE_MODE_COOL);
+    EXPECT_TRUE(f.climate.get_custom_preset() == "iAUTO-X");
     EXPECT_EQ(f.climate.fan_mode.value(), climate::CLIMATE_FAN_AUTO);
   }
 }
@@ -1116,6 +1118,67 @@ TEST(PanasonicTimers, NormalisesTimeAndImportsRemoteSetWithoutEcho) {
   EXPECT_EQ(entity.hour, 6);
   EXPECT_TRUE(timers.get_enabled(TimerSlot::TIMER_SLOT_ON1));
   EXPECT_EQ(f.transmitter.frames.size(), 1u);
+}
+
+TEST(PanasonicClimate, IautoPresetRejectsFanOnlyRequestsAndAppliesMixedChanges) {
+  Fixture f(Model::RKR);
+  f.command([](auto &call) { call.set_preset("iAUTO-X"); });
+  ASSERT_EQ(f.transmitter.frames.size(), 1);
+  EXPECT_EQ(f.climate.mode, climate::CLIMATE_MODE_COOL);
+  EXPECT_TRUE(f.climate.get_custom_preset() == "iAUTO-X");
+  unsigned publications = 0;
+  f.climate.add_on_state_callback([&](const auto &) { ++publications; });
+  f.command([](auto &call) { call.set_fan_mode("Maximum"); });
+  EXPECT_EQ(publications, 1);
+  EXPECT_EQ(f.transmitter.frames.size(), 1);
+  EXPECT_EQ(f.climate.fan_mode, climate::CLIMATE_FAN_AUTO);
+  f.command([](auto &call) {
+    call.set_fan_mode(climate::CLIMATE_FAN_HIGH);
+    call.set_target_temperature(23);
+    call.set_swing_mode(climate::CLIMATE_SWING_VERTICAL);
+  });
+  ASSERT_EQ(f.transmitter.frames.size(), 2);
+  EXPECT_EQ(f.last_state()[14], 46);
+  EXPECT_EQ(f.last_state()[16], 0xAF);
+  EXPECT_EQ(f.last_state()[25], 0x80);
+  f.command([](auto &call) {
+    call.set_preset(climate::CLIMATE_PRESET_NONE);
+    call.set_fan_mode("Maximum");
+  });
+  EXPECT_EQ(f.climate.mode, climate::CLIMATE_MODE_COOL);
+  EXPECT_EQ(f.climate.preset, climate::CLIMATE_PRESET_NONE);
+  EXPECT_TRUE(f.climate.get_custom_fan_mode() == "Maximum");
+  EXPECT_EQ(f.last_state()[13] >> 4, static_cast<uint8_t>(Mode::COOL));
+  EXPECT_EQ(f.last_state()[25] & 0x80, 0);
+  f.command([](auto &call) {
+    call.set_mode(climate::CLIMATE_MODE_OFF);
+    call.set_preset("iAUTO-X");
+  });
+  EXPECT_EQ(f.climate.mode, climate::CLIMATE_MODE_OFF);
+  EXPECT_FALSE(f.climate.has_custom_preset());
+}
+
+TEST(PanasonicClimate, IautoUnavailableWhenCoolingIsDisabled) {
+  Fixture f(Model::RKR);
+  f.climate.set_supports_cool(false);
+  f.climate.setup();
+  EXPECT_FALSE(f.climate.get_traits().supports_custom_preset("iAUTO-X"));
+  f.climate.enable_iauto();
+  EXPECT_TRUE(f.transmitter.frames.empty());
+}
+
+TEST(PanasonicClimate, NanoeGWhileOffSendsOnlyThePurificationCommand) {
+  Fixture f(Model::RKR);
+  f.climate.send_nanoe_g();
+  ASSERT_EQ(f.transmitter.frames.size(), 1);
+  uint8_t state[STATE_LENGTH];
+  bool short_command = false;
+  remote_base::RemoteReceiveData data(f.transmitter.frames.back(), TOLERANCE_PERCENT,
+                                      remote_base::TOLERANCE_MODE_PERCENTAGE);
+  ASSERT_TRUE(read_state(data, state, &short_command));
+  EXPECT_TRUE(short_command);
+  EXPECT_EQ(encode_uint16(state[13], state[14]), 0x6133);
+  EXPECT_EQ(f.climate.mode, climate::CLIMATE_MODE_OFF);
 }
 
 #ifdef USE_SWITCH
@@ -1425,6 +1488,8 @@ TEST(PanasonicClimate, IautoRemembersLocalAndRemoteTargets) {
   remote.climate.enable_iauto();
   remote.command([](auto &call) { call.set_target_temperature(23); });
   ASSERT_TRUE(listener.receive(remote.transmitter.frames.back()));
+  EXPECT_EQ(listener.climate.mode, climate::CLIMATE_MODE_COOL);
+  EXPECT_TRUE(listener.climate.get_custom_preset() == "iAUTO-X");
   for (auto *fixture : {&remote, &listener}) {
     fixture->command([](auto &call) {
       call.set_mode(climate::CLIMATE_MODE_HEAT);
@@ -1672,6 +1737,7 @@ TEST(PanasonicIntegration, ExplicitEconaviOnSynchronisesAutoWithoutSendingVaneFr
   EXPECT_EQ(f.transmitter.frames.size(), ++count);
   f.expect_short(0x68F2);
   EXPECT_EQ(vane.active_index().value(), 0u);
+  EXPECT_EQ(f.climate.swing_mode, climate::CLIMATE_SWING_HORIZONTAL);
   vane.make_call().set_index(5).perform();
   EXPECT_EQ(f.transmitter.frames.size(), ++count);
   EXPECT_FALSE(f.eco.state);
@@ -1683,9 +1749,12 @@ TEST(PanasonicIntegration, ExplicitEconaviOnSynchronisesAutoWithoutSendingVaneFr
   f.eco.turn_on();
   count = f.transmitter.frames.size();
   vane.make_call().set_index(3).perform();
-  EXPECT_FALSE(f.eco.state);
+  EXPECT_EQ(f.transmitter.frames.size(), count);
+  EXPECT_TRUE(f.eco.state);
   f.mode(climate::CLIMATE_MODE_COOL);
-  EXPECT_EQ(f.transmitter.frames.size(), count + 2);
+  EXPECT_EQ(f.transmitter.frames.size(), count + 1);
+  EXPECT_EQ(f.last_state()[17], VANE_H_MIDDLE);
+  EXPECT_FALSE(f.eco.state);
 }
 
 TEST(PanasonicIntegration, ReceivedEconaviOnSynchronisesSelectWithoutReply) {
@@ -1699,8 +1768,49 @@ TEST(PanasonicIntegration, ReceivedEconaviOnSynchronisesSelectWithoutReply) {
   remote.climate.set_econavi(true);
   ASSERT_TRUE(f.receive(remote.transmitter.frames.back()));
   EXPECT_EQ(vane.active_index().value(), 0u);
+  EXPECT_EQ(f.climate.swing_mode, climate::CLIMATE_SWING_BOTH);
   EXPECT_TRUE(f.eco.state);
   EXPECT_TRUE(f.transmitter.frames.empty());
+}
+
+TEST(PanasonicIntegration, IautoKeepsMildDryPreferenceInactiveUntilOrdinaryCool) {
+  FeatureFixture f;
+  f.dry.turn_on();
+  f.climate.enable_iauto();
+  EXPECT_TRUE(f.dry.state);
+  EXPECT_FALSE(f.climate.is_mild_dry_active());
+  EXPECT_FALSE(f.climate.can_set_mild_dry());
+  EXPECT_EQ(f.last_state()[15], 0x80);
+  f.command([](auto &call) { call.set_preset(climate::CLIMATE_PRESET_NONE); });
+  EXPECT_TRUE(f.climate.is_mild_dry_active());
+  EXPECT_EQ(f.last_state()[15], 0x7F);
+}
+
+TEST(PanasonicIntegration, TimerSlotBitsDoNotActivateIauto) {
+  Fixture f(Model::RKR);
+  TimerClock clock;
+  RkrTimers timers(&f.climate, &clock);
+  timers.setup();
+  f.climate.set_timer_controller(&timers);
+  uint8_t state[STATE_LENGTH];
+  RkrTimerFields fields;
+  encode_frame({.model = Model::RKR, .power = true, .mode = Mode::AUTO}, state);
+  ASSERT_TRUE(make_rkr_timer_operation(TimerSlot::TIMER_SLOT_OFF2, 510, true, 480, fields));
+  ASSERT_TRUE(encode_rkr_timers(fields, state));
+  ASSERT_NE(state[25] & 0x80, 0);
+  ASSERT_TRUE(f.receive(state));
+  EXPECT_EQ(f.climate.mode, climate::CLIMATE_MODE_HEAT_COOL);
+  EXPECT_FALSE(f.climate.has_custom_preset());
+  EXPECT_TRUE(timers.get_enabled(TimerSlot::TIMER_SLOT_OFF2));
+  EXPECT_EQ(timers.get_minutes(TimerSlot::TIMER_SLOT_OFF2), 510);
+  EXPECT_TRUE(f.transmitter.frames.empty());
+  f.climate.enable_iauto();
+  ASSERT_TRUE(timers.set_timer(TimerSlot::TIMER_SLOT_OFF1, 520, true));
+  const auto sent = f.last_state();
+  EXPECT_EQ(sent[23], 0x80);
+  EXPECT_FALSE(decode_rkr_timers(sent.data()).off_slot2);
+  EXPECT_EQ(f.climate.mode, climate::CLIMATE_MODE_COOL);
+  EXPECT_TRUE(f.climate.get_custom_preset() == "iAUTO-X");
 }
 
 TEST(PanasonicIntegration, TimerCommandsDoNotFlushDeferredFeatureEdits) {
